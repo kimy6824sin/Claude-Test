@@ -28,6 +28,7 @@ from meshrev.core.document import (
     Document,
 )
 from meshrev.core.features import (
+    AccuracyAnalysisFeature,
     AddFeatureCommand,
     AutoSegmentFeature,
     BooleanFeature,
@@ -426,6 +427,20 @@ class DocumentController(QObject):
             return False
         tool_id = self._selection.body_id
         return tool_id is not None and self.boolean(target_id, tool_id, "cut")
+
+    def accuracy_analysis(
+        self, mesh_id: str, cad_id: str, background: bool = True, **params: Any
+    ) -> bool:
+        """Deviation heat map of a scan mesh against a CAD body."""
+        feature = AccuracyAnalysisFeature(
+            inputs=[mesh_id, cad_id],
+            params=params or None,
+            name=self._next_name(AccuracyAnalysisFeature),
+        )
+        if background:
+            self.add_feature(feature, background=True)
+            return True
+        return self._add_and_select(feature)
 
     def set_region_color_scheme(self, scheme: str) -> None:
         self.region_color_scheme = scheme

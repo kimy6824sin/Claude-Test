@@ -231,3 +231,20 @@ def test_loop_deviation_measures_distance_to_entities():
     assert loop_deviation([arc], np.array([[0.0, 1.2]])) == pytest.approx(0.2)
     assert arc.end == pytest.approx((0.0, 1.0))
     assert Arc2D((0, 0), 1.0, math.pi / 2, 0.0, ccw=False).sweep == pytest.approx(math.pi / 2)
+
+
+def test_gear_teeth_are_kept_but_tapped_hole_is_a_circle():
+    from meshrev.core.sketch_fit import fit_profiles_2d
+
+    th = np.linspace(0, 2 * math.pi, 3600, endpoint=False)
+    # 60 teeth, 1.5 mm high on r = 50: only 1.5% of the radius, still the feature
+    gear_r = 50.0 + 0.75 * np.sign(np.sin(60 * th))
+    gear = np.column_stack([gear_r * np.cos(th), gear_r * np.sin(th)])
+    t = np.linspace(0, 2 * math.pi, 360, endpoint=False)
+    thread_r = 8.0 + 0.1 * np.sign(np.sin(30 * t))  # tapped centre bore
+    bore = np.column_stack([thread_r * np.cos(t), thread_r * np.sin(t)])
+    result = fit_profiles_2d([gear, bore], [True, True], Plane((0, 0, 0), (0, 0, 1)))
+    outer, hole = sorted(result.loops, key=lambda lp: lp.depth)
+    assert not any(isinstance(e, Circle2D) for e in outer.entities)
+    assert len(outer.entities) >= 200  # every tooth flank and tip
+    assert len(hole.entities) == 1 and isinstance(hole.entities[0], Circle2D)

@@ -34,6 +34,8 @@ from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.IGESControl import IGESControl_Reader, IGESControl_Writer
 from OCP.Interface import Interface_Static
+from OCP.ShapeFix import ShapeFix_Shape
+from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.STEPControl import STEPControl_AsIs, STEPControl_Reader, STEPControl_Writer
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
@@ -51,6 +53,18 @@ if TYPE_CHECKING:
 def _static(cls: Any, name: str) -> Any:
     """OCP < 8 suffixes static methods with ``_s``; OCP 8 dropped it for some classes."""
     return getattr(cls, f"{name}_s", None) or getattr(cls, name)
+
+
+def _shape_list(shapes: Sequence[Shape]) -> Any:
+    """OCCT ``TopTools_ListOfShape`` (exposed as ``OCP.collections`` in OCP 8)."""
+    try:
+        from OCP.collections import List_TopoDS_Shape as ShapeList
+    except ImportError:  # OCP 7.x
+        from OCP.TopTools import TopTools_ListOfShape as ShapeList
+    items = ShapeList()
+    for shape in shapes:
+        items.Append(shape)
+    return items
 
 
 def _pnt(p: FloatArray) -> gp_Pnt:
@@ -147,13 +161,32 @@ class OccKernel(CadKernel):
         return BRepPrimAPI_MakeCylinder(ax2, float(radius), float(length)).Shape()
 
     def fuse_all(self, shapes: Sequence[Shape]) -> Shape:
+        """Fuse many solids. Sequential fuses are tried first; if the result is
+        invalid (near-coincident faces of stacked layers), a single multi-argument
+        fuse with a fuzzy tolerance is used instead."""
         shapes = list(shapes)
         if not shapes:
             raise ValueError("nothing to fuse")
         result = shapes[0]
         for shape in shapes[1:]:
             result = self.boolean(result, shape, BooleanOp.UNION)
+        if len(shapes) > 1 and not self.is_valid(result):
+            for fuzzy in (1e-6, 1e-5, 1e-4):
+                op = BRepAlgoAPI_Fuse()
+                op.SetArguments(_shape_list(shapes[:1]))
+                op.SetTools(_shape_list(shapes[1:]))
+                op.SetFuzzyValue(fuzzy)
+                op.Build()
+                if op.IsDone() and self.is_valid(op.Shape()):
+                    return op.Shape()
         return result
+
+    def clean(self, shape: Shape) -> Shape:
+        unify = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
+        unify.Build()
+        fixer = ShapeFix_Shape(unify.Shape())
+        fixer.Perform()
+        return fixer.Shape()
 
     def is_valid(self, shape: Shape) -> bool:
         return bool(BRepCheck_Analyzer(shape).IsValid())

@@ -31,6 +31,7 @@ class BodyKind(str, Enum):
     DATUM_AXIS = "datum_axis"
     DATUM_PLANE = "datum_plane"
     SKETCH = "sketch"
+    DEVIATION = "deviation"
 
 
 def _fmt(value: float, digits: int = 4) -> str:
@@ -436,4 +437,27 @@ class SketchBody(Body):
         info["最大偏差"] = f"{result.max_deviation:.4f}"
         for k, text in enumerate(result.describe(limit=80)):
             info[f"#{k:02d}"] = text.strip()
+        return info
+
+
+class DeviationBody(Body):
+    """Colour-mapped accuracy analysis result (scan mesh or CAD samples)."""
+
+    kind = BodyKind.DEVIATION
+    tag_prefix = "D"
+
+    def __init__(self, geometry: pv.PolyData, result, name: str, bands: int = 15, **kwargs) -> None:
+        super().__init__(name, **kwargs)
+        self.geometry = geometry
+        self.result = result  # meshrev.core.deviation.DeviationResult
+        self.bands = bands
+
+    def to_polydata(self) -> pv.PolyData:
+        data = self.geometry.copy(deep=False)
+        data.point_data["deviation"] = self.result.distances
+        return data
+
+    def info(self) -> dict[str, str]:
+        info = super().info()
+        info.update(self.result.report())
         return info

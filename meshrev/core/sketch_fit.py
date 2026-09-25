@@ -387,7 +387,8 @@ class SketchFitOptions:
     min_loop_length: float | None = None  # None -> 20 * tolerance
     min_line_length: float | None = None  # None -> 1.5 * tolerance
     min_feature_length: float | None = None  # chamfer/noise entities collapse; None -> 5 * tol
-    hole_circularity: float = 0.03  # closed loops this round (RMS / r) become circles
+    hole_circularity: float = 0.03  # small loops this round (RMS / r) become circles
+    small_hole_ratio: float = 0.25  # outer loops: round only if radius <= ratio * section size
 
 
 @dataclass
@@ -838,14 +839,18 @@ def _whole_circle(
     tol: float,
     options: SketchFitOptions,
     size: float,
+    section_size: float = math.inf,
 ) -> Circle2D | None:
     """Design intent for holes and round sections.
 
     A closed loop is one circle if (a) the geometric circle fit is within the
     tolerance widened by the tessellation sagitta ``L²/(8r)`` of the longest
     mesh chords (coarse STL facets are not features), or (b) it is round within
-    ``hole_circularity`` (RMS / r) and reasonably small - e.g. a tapped hole,
-    whose thread flanks make the raw section non-circular.
+    ``hole_circularity`` (RMS / r) and it is a hole, or an outer loop that is small
+    (r <= ``small_hole_ratio`` x ``section_size``) - e.g. a tapped hole, whose
+    thread flanks make the raw section non-circular.  Large outer loops never get
+    this licence: the teeth of a ring gear are only a few percent of its radius
+    but are the feature itself.
     """
     if not closed or len(pts) < options.min_arc_points:
         return None
@@ -864,7 +869,8 @@ def _whole_circle(
     rms = float(np.sqrt(np.mean(res**2)))
     exact = res.max() <= tol + sagitta
     round_hole = (
-        rms <= options.hole_circularity * circle.radius
+        circle.radius <= options.small_hole_ratio * section_size
+        and rms <= options.hole_circularity * circle.radius
         and res.max() <= 3.0 * options.hole_circularity * circle.radius
     )
     if exact or round_hole:
@@ -956,10 +962,13 @@ def fit_polyline(
     tol: float,
     options: SketchFitOptions | None = None,
     size: float | None = None,
+    is_hole: bool | None = None,
 ) -> tuple[list[SketchEntity], FloatArray, float]:
     """Fit one ordered 2D polyline; returns ``(entities, denoised points, max deviation)``."""
     options = options or SketchFitOptions()
     raw = np.asarray(points, dtype=np.float64)
+    # the round-hole licence: holes and lone loops always, outer loops only if small
+    licence_size = math.inf if is_hole in (True, None) else (size or math.inf)
     size = size or float(np.linalg.norm(np.ptp(raw, axis=0)))
     seg_len = np.linalg.norm(np.diff(raw, axis=0), axis=1)
     spacing = float(np.clip(np.median(seg_len) if len(seg_len) else tol, 0.5 * tol, 2.0 * tol))
@@ -969,7 +978,7 @@ def fit_polyline(
         return [], pts, 0.0
 
     # a whole closed loop on one circle: bolt hole, bore, cylinder section
-    circle = _whole_circle(raw, pts, closed, tol, options, size)
+    circle = _whole_circle(raw, pts, closed, tol, options, size, licence_size)
     if circle is not None:
         return [circle], pts, loop_deviation([circle], pts)
 
@@ -1060,7 +1069,9 @@ def fit_profiles_2d(
             if (area > 0) != want_ccw:
                 pts = pts[::-1]
                 area = -area
-        entities, clean, max_dev = fit_polyline(pts, is_closed, tol, options, size)
+        entities, clean, max_dev = fit_polyline(
+            pts, is_closed, tol, options, size, is_hole=depth[k] % 2 == 1 if is_closed else None
+        )
         if not entities:
             continue
         index_of[k] = len(result.loops)

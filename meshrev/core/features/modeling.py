@@ -194,3 +194,60 @@ class BooleanFeature(Feature):
         body = CadBody(shape, self.name, kernel=kernel, color=target.color)
         body.consumes = [target.id, tool.id]
         return [body]
+
+
+@register_feature
+class AccuracyAnalysisFeature(Feature):
+    """Design X style accuracy analyzer: signed deviation between a scan mesh and a
+    CAD body, shown as a banded blue-green-red heat map with statistics."""
+
+    type_name = "AccuracyAnalysis"
+    label = "精度分析"
+    params_spec = (
+        ParamSpec("tolerance", "公差 ±", "float", 0.1, 1e-4, 100.0, 0.01, 4, suffix=" mm"),
+        ParamSpec(
+            "max_range",
+            "最大偏差（显示/统计范围）",
+            "float",
+            1.0,
+            1e-3,
+            1e3,
+            0.1,
+            3,
+            suffix=" mm",
+            tooltip="超出此范围的点显示为灰色，不计入统计",
+        ),
+        ParamSpec(
+            "direction",
+            "方向",
+            "choice",
+            "mesh_to_cad",
+            choices=(("mesh_to_cad", "网格 → CAD"), ("cad_to_mesh", "CAD → 网格")),
+        ),
+        ParamSpec("bands", "色带数", "int", 15, 3, 41),
+    )
+
+    def execute(self, ctx: FeatureContext) -> list[Body]:
+        from meshrev.core.bodies import DeviationBody, MeshBody
+        from meshrev.core.deviation import compute_deviation
+
+        mesh = ctx.body(self.inputs[0], MeshBody)
+        cad = ctx.body(self.inputs[1], CadBody)
+        p = self.params
+        ctx.report(0.1, "计算距离场")
+        result = compute_deviation(
+            mesh.polydata,
+            cad,
+            tolerance=float(p["tolerance"]),
+            max_range=float(p["max_range"]),
+            direction=p["direction"],
+        )
+        if p["direction"] == "mesh_to_cad":
+            geometry = mesh.polydata
+        else:
+            import pyvista as pv
+
+            geometry = pv.PolyData(result.points)
+        body = DeviationBody(geometry, result, self.name, bands=int(p["bands"]))
+        body.consumes = [mesh.id, cad.id]
+        return [body]

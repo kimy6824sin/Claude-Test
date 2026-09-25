@@ -75,3 +75,33 @@ class PinBoreDialog(_Dialog):
 
     def values(self) -> tuple[str, str, float]:
         return self.target.currentData(), self.axis.currentData(), self.radius.value()
+
+
+class AccuracyDialog(_Dialog):
+    def __init__(self, meshes: list[Body], solids: list[Body], parent=None) -> None:
+        super().__init__("精度分析（Accuracy Analyzer）", parent)
+        self.mesh = _combo(meshes, None)
+        self.cad = _combo(solids, None)
+        self.tolerance = QDoubleSpinBox(minimum=1e-4, maximum=100, decimals=4, singleStep=0.01)
+        self.tolerance.setValue(0.1)
+        self.tolerance.setSuffix(" mm")
+        self.max_range = QDoubleSpinBox(minimum=1e-3, maximum=1000, decimals=3, singleStep=0.1)
+        self.max_range.setValue(1.0)
+        self.max_range.setSuffix(" mm")
+        self.direction = QComboBox()
+        self.direction.addItem("网格 → CAD（扫描点到模型）", "mesh_to_cad")
+        self.direction.addItem("CAD → 网格（模型面到扫描）", "cad_to_mesh")
+        self.form.addRow("扫描网格", self.mesh)
+        self.form.addRow("CAD 实体", self.cad)
+        self.form.addRow("公差 ±", self.tolerance)
+        self.form.addRow("最大偏差范围", self.max_range)
+        self.form.addRow("方向", self.direction)
+        self.finish()
+
+    def values(self) -> tuple[str, str, dict]:
+        params = {
+            "tolerance": self.tolerance.value(),
+            "max_range": self.max_range.value(),
+            "direction": self.direction.currentData(),
+        }
+        return self.mesh.currentData(), self.cad.currentData(), params

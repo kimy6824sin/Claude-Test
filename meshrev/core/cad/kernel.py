@@ -65,6 +65,10 @@ class CadKernel(ABC):
     def fuse_all(self, shapes: Sequence[Shape]) -> Shape: ...
 
     @abstractmethod
+    def clean(self, shape: Shape) -> Shape:
+        """Merge coplanar/co-cylindrical faces and fix small defects (after fusing)."""
+
+    @abstractmethod
     def is_valid(self, shape: Shape) -> bool:
         """Topological/geometric validity check (BRepCheck)."""
 

@@ -18,6 +18,7 @@ from meshrev.gui.display import HIGHLIGHT_COLOR, DisplayMode, apply_display_mode
 HIGHLIGHT_NAME = "__highlight__"
 REGION_RGB = "region_rgb"
 SKETCH_RGB = "sketch_rgb"
+DEVIATION_BAR = "deviation [mm]"
 # line: blue, arc: magenta, circle: orange (indexed by SketchBody entity_type)
 SKETCH_COLORS = np.array([[25, 115, 240], [210, 40, 170], [245, 140, 20]], dtype=np.uint8)
 
@@ -65,6 +66,7 @@ class SceneManager:
             BodyKind.DATUM_AXIS: self._build_datum_axis,
             BodyKind.DATUM_PLANE: self._build_datum_plane,
             BodyKind.SKETCH: self._build_sketch,
+            BodyKind.DEVIATION: self._build_deviation,
         }
 
     # -- registration -----------------------------------------------------------------
@@ -97,6 +99,8 @@ class SceneManager:
         visual = self._visuals.pop(body_id, None)
         if visual is None:
             return
+        if visual.kind is BodyKind.DEVIATION and DEVIATION_BAR in self.plotter.scalar_bars:
+            self.plotter.remove_scalar_bar(DEVIATION_BAR, render=False)
         for actor in visual.actors:
             self._actor_owner.pop(id(actor), None)
             if actor in visual.overlay:
@@ -341,6 +345,56 @@ class SceneManager:
         label = self._label(body, plane.points[np.argmax(plane.points @ np.ones(3))])
         return BodyVisual(
             body.id, body.kind, [actor, label], datum=actor, base_color=tuple(body.color)
+        )
+
+    def _build_deviation(self, body: Body) -> BodyVisual:
+        """Accuracy analyzer heat map with a banded colour bar (one bar at a time)."""
+        from meshrev.core.deviation import deviation_lut
+
+        result = body.result
+        data = body.to_polydata()
+        surface = data.faces.size > 0
+        if surface:
+            data = display_mesh(data)
+        actor = self.plotter.add_mesh(
+            data,
+            scalars="deviation",
+            cmap=deviation_lut(result.tolerance, result.max_range, body.bands),
+            clim=(-result.max_range, result.max_range),
+            name=f"body:{body.id}",
+            point_size=3,
+            render_points_as_spheres=not surface,
+            reset_camera=False,
+            show_scalar_bar=False,
+            render=False,
+        )
+        self._show_deviation_bar(actor, result)
+        visual = BodyVisual(
+            body.id,
+            body.kind,
+            [actor],
+            surface=actor if surface else None,
+            mesh=data if surface else None,
+        )
+        return visual
+
+    def _show_deviation_bar(self, actor, result) -> None:
+        if DEVIATION_BAR in self.plotter.scalar_bars:
+            self.plotter.remove_scalar_bar(DEVIATION_BAR, render=False)
+        self.plotter.add_scalar_bar(
+            DEVIATION_BAR,
+            mapper=actor.GetMapper(),
+            vertical=True,
+            n_labels=9,
+            fmt="%+.3f",
+            position_x=0.88,
+            position_y=0.15,
+            height=0.7,
+            width=0.06,
+            label_font_size=12,
+            title_font_size=13,
+            color="black",
+            render=False,
         )
 
     def _build_sketch(self, body: Body) -> BodyVisual:

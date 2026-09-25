@@ -18,6 +18,7 @@ from meshrev.core.features.commands import (
 )
 from meshrev.core.features.history import FeatureHistory
 from meshrev.core.features.modeling import (
+    AccuracyAnalysisFeature,
     BooleanFeature,
     CylinderFeature,
     ExtrudeFeature,
@@ -33,6 +34,7 @@ from meshrev.core.features.sketching import MeshSketchFeature
 
 __all__ = [
     "FEATURE_TYPES",
+    "AccuracyAnalysisFeature",
     "AddFeatureCommand",
     "AutoSegmentFeature",
     "BooleanFeature",

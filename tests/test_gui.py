@@ -157,3 +157,32 @@ def test_modeling_workflow_with_live_parameter_edit(window, qtbot):
     c.undo()  # radius edit
     c.undo()  # boolean
     assert block.visible
+
+
+def test_accuracy_analysis_heat_map(window):
+    from meshrev.core.bodies import CadBody, DeviationBody
+    from meshrev.core.cad import get_kernel, is_available
+    from meshrev.core.features import ImportFeature
+    from meshrev.core.samples import make_capped_cylinder
+    from meshrev.core.types import Axis
+    from meshrev.gui.scene import DEVIATION_BAR
+
+    if not is_available():
+        pytest.skip("OCP (cadquery-ocp) not installed")
+    c = window.controller
+    scan = MeshBody(make_capped_cylinder(9.9, 20.0, n_theta=128), "scan")
+    c.document.history.append(ImportFeature("scan.stl", bodies=[scan]))
+    kernel = get_kernel()
+    cad = CadBody(kernel.cylinder(Axis((0, 0, 0), (0, 0, 1)), 10.0, 20.0), "cad", kernel=kernel)
+    c.document.add_body(cad)
+    assert c.accuracy_analysis(scan.id, cad.id, background=False, tolerance=0.05)
+    (heat,) = c.document.bodies_of_type(DeviationBody)
+    stats = heat.result.stats
+    assert stats.max_negative == pytest.approx(-0.1, abs=0.01)  # material missing
+    assert "deviation" in heat.to_polydata().point_data
+    assert not scan.visible and not cad.visible and heat.visible
+    plotter = window.viewport.scene.plotter
+    assert DEVIATION_BAR in plotter.scalar_bars
+    c.undo()
+    assert scan.visible and cad.visible
+    assert DEVIATION_BAR not in plotter.scalar_bars

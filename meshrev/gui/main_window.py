@@ -28,12 +28,12 @@ from PySide6.QtWidgets import (
 
 from meshrev import __version__
 from meshrev import io as mio
-from meshrev.core.bodies import BodyKind, DatumAxisBody, SketchBody
+from meshrev.core.bodies import BodyKind, DatumAxisBody, MeshBody, SketchBody
 from meshrev.gui.camera import InteractionPreset, StandardView
 from meshrev.gui.controller import DocumentController, Selection
 from meshrev.gui.display import DisplayMode
 from meshrev.gui.feature_tree import FeatureTree
-from meshrev.gui.modeling_dialogs import BooleanDialog, PinBoreDialog
+from meshrev.gui.modeling_dialogs import AccuracyDialog, BooleanDialog, PinBoreDialog
 from meshrev.gui.property_panel import PropertyPanel
 from meshrev.gui.sketch_dialog import MeshSketchDialog
 from meshrev.gui.viewport import Viewport3D
@@ -239,6 +239,12 @@ class MainWindow(QMainWindow):
             tip="圆柱 + 求差，孔半径可在圆柱特征中修改并自动重建",
         )
         self.act_export_cad = self._action("导出 CAD（STEP / IGES）…", self._export_cad_dialog)
+        self.act_accuracy = self._action(
+            "精度分析…",
+            self._accuracy_dialog,
+            "Ctrl+Shift+D",
+            tip="扫描网格与 CAD 实体的带符号偏差色谱（蓝=负/欠料，绿=公差内，红=正/过切）",
+        )
         self.scheme_group = QActionGroup(self)
         self.scheme_actions: dict[str, QAction] = {}
         for scheme, text in (("region", "按区域着色"), ("type", "按基元类型着色")):
@@ -300,6 +306,9 @@ class MainWindow(QMainWindow):
         model_menu.addAction(self.act_export_cad)
         self.model_menu = model_menu
 
+        analysis_menu = bar.addMenu("分析(&A)")
+        analysis_menu.addAction(self.act_accuracy)
+
         help_menu = bar.addMenu("帮助(&H)")
         help_menu.addActions([self.act_mouse_help, self.act_about])
 
@@ -355,7 +364,13 @@ class MainWindow(QMainWindow):
         model_bar.setObjectName("toolbar_modeling")
         model_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         model_bar.addActions(
-            [self.act_extrude, self.act_revolve, self.act_pin_bore, self.act_boolean]
+            [
+                self.act_extrude,
+                self.act_revolve,
+                self.act_pin_bore,
+                self.act_boolean,
+                self.act_accuracy,
+            ]
         )
         self.addToolBar(model_bar)
 
@@ -429,6 +444,17 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             target, axis, radius = dialog.values()
             self.controller.pin_bore(target, axis, radius)
+
+    def _accuracy_dialog(self) -> None:
+        meshes = self.controller.document.bodies_of_type(MeshBody)
+        solids = self._cad_bodies()
+        if not meshes or not solids:
+            QMessageBox.information(self, "精度分析", "需要一个扫描网格和一个 CAD 实体")
+            return
+        dialog = AccuracyDialog(meshes, solids, self)
+        if dialog.exec():
+            mesh_id, cad_id, params = dialog.values()
+            self.controller.accuracy_analysis(mesh_id, cad_id, **params)
 
     def _export_cad_dialog(self) -> None:
         solids = [b for b in self._cad_bodies() if b.visible] or self._cad_bodies()
