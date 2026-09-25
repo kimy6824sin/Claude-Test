@@ -549,15 +549,21 @@ def grid_region_loops(
     loops = []
     while outgoing:
         start = next(iter(outgoing))
-        loop, p = [start], start
+        loop, p, prev = [start], start, None
         while True:
-            q = outgoing[p].pop()
+            options = outgoing[p]
+            if len(options) > 1 and prev is not None:
+                # pinch vertex (cells touching diagonally): turn left, i.e. keep
+                # hugging the current cell, so the two regions stay separate loops
+                din = (p[0] - prev[0], p[1] - prev[1])
+                options.sort(key=lambda q: din[0] * (q[1] - p[1]) - din[1] * (q[0] - p[0]))
+            q = options.pop()
             if not outgoing[p]:
                 del outgoing[p]
             if q == start:
                 break
             loop.append(q)
-            p = q
+            prev, p = p, q
         pts = np.array([[row_edges[i], col_edges[j]] for i, j in loop], float)
         prev, nxt = np.roll(pts, 1, axis=0), np.roll(pts, -1, axis=0)
         e0, e1 = pts - prev, nxt - pts
@@ -699,24 +705,25 @@ def reconstruct_hybrid(
         loops = grid_region_loops(grid == label, h_edges, r_edges)
         # each zone is a revolved rectilinear (h, r) profile: one clean solid, no
         # fusing of many coincident-faced rings (fragile in OCC booleans)
-        zone_solids = [
-            kernel.revolve(sk, Axis(o, a), 360.0) for sk in loops_to_sketches(loops, plane)
-        ]
-        region = kernel.fuse_all(zone_solids)
-        # the common part is symmetric, but OCC's classification of a large faceted
-        # solid occasionally fails in one argument order (almost nothing is
-        # returned); both orders are computed and the larger (correct) one kept
-        piece = max(
-            (
-                kernel.boolean(region, candidates[label].body.shape, BooleanOp.INTERSECT),
-                kernel.boolean(candidates[label].body.shape, region, BooleanOp.INTERSECT),
-            ),
-            key=kernel.volume,
-        )
+        # each zone is a revolved rectilinear (h, r) profile, intersected with the
+        # candidate separately (zones are disjoint; fusing them first can fail).
+        # The common part is symmetric, but OCC's classification of a large
+        # faceted solid occasionally fails in one argument order (almost nothing
+        # is returned); both orders are computed and the larger one kept.
+        shape = candidates[label].body.shape
+        for sketch in loops_to_sketches(loops, plane):
+            zone = kernel.revolve(sketch, Axis(o, a), 360.0)
+            piece = max(
+                (
+                    kernel.boolean(zone, shape, BooleanOp.INTERSECT),
+                    kernel.boolean(shape, zone, BooleanOp.INTERSECT),
+                ),
+                key=kernel.volume,
+            )
+            if kernel.volume(piece) > 0:
+                pieces.append(piece)
         share = float((grid == label).mean())
         steps.append(f"  {candidates[label].body.name}: {100 * share:.1f}% 的区域单元")
-        if kernel.volume(piece) > 0:
-            pieces.append(piece)
     fused = kernel.fuse_all(pieces)
     cleaned = kernel.clean(fused)
     shape = cleaned if kernel.is_valid(cleaned) or not kernel.is_valid(fused) else fused

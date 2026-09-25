@@ -169,3 +169,12 @@ def test_prismatic_workflow_on_flange():
     assert result.body.kernel.topology_counts(result.body.shape)["solids"] == 1
     s = result.deviation.stats
     assert s.within_tolerance > 0.9 and s.rms < 0.1 and s.out_of_range == 0
+
+
+def test_grid_regions_touching_diagonally_stay_separate():
+    from meshrev.core.sketch_fit import polygon_area
+    from meshrev.core.workflows import grid_region_loops
+
+    mask = np.array([[True, False], [False, True]])
+    loops = grid_region_loops(mask, np.arange(3.0), np.arange(3.0))
+    assert sorted(polygon_area(lp) for lp in loops) == pytest.approx([1.0, 1.0])
