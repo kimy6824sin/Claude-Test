@@ -70,14 +70,24 @@ class Units(str, Enum):
 
 @dataclass(frozen=True, eq=False)
 class Plane:
-    """Infinite plane through ``origin`` with unit ``normal``."""
+    """Infinite plane through ``origin`` with unit ``normal``.
+
+    ``x_axis`` optionally fixes the in-plane 2D frame used by :meth:`to_local`
+    (sketch coordinates); it is projected into the plane. Without it an
+    arbitrary but deterministic frame is used.
+    """
 
     origin: FloatArray
     normal: FloatArray
+    x_axis: FloatArray | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "origin", as_vec3(self.origin))
         object.__setattr__(self, "normal", normalize(self.normal))
+        if self.x_axis is not None:
+            x = as_vec3(self.x_axis)
+            x = x - (x @ self.normal) * self.normal
+            object.__setattr__(self, "x_axis", normalize(x))
 
     @classmethod
     def from_equation(cls, a: float, b: float, c: float, d: float) -> Plane:
@@ -107,7 +117,10 @@ class Plane:
         return pts - np.outer(self.signed_distance(pts), self.normal)
 
     def basis(self) -> tuple[FloatArray, FloatArray]:
-        return orthonormal_basis(self.normal)
+        """Right-handed in-plane frame ``(u, v)`` with ``u × v = normal``."""
+        if self.x_axis is None:
+            return orthonormal_basis(self.normal)
+        return self.x_axis, np.cross(self.normal, self.x_axis)
 
     def to_local(self, points: ArrayLike) -> FloatArray:
         """Express points in the plane's 2D ``(u, v)`` frame."""
@@ -121,7 +134,11 @@ class Plane:
         return self.origin + np.outer(uv[:, 0], u) + np.outer(uv[:, 1], v)
 
     def flipped(self) -> Plane:
-        return Plane(self.origin, -self.normal)
+        return Plane(self.origin, -self.normal, self.x_axis)
+
+    def offset(self, distance: float) -> Plane:
+        """Parallel plane shifted by ``distance`` along the normal (same 2D frame)."""
+        return Plane(self.origin + distance * self.normal, self.normal, self.x_axis)
 
     def __repr__(self) -> str:
         a, b, c, d = self.equation

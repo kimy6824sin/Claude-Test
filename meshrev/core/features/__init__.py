@@ -23,6 +23,7 @@ from meshrev.core.features.recognition import (
     DatumPlaneFeature,
     PrimitiveDetectFeature,
 )
+from meshrev.core.features.sketching import MeshSketchFeature
 
 __all__ = [
     "FEATURE_TYPES",
@@ -38,6 +39,7 @@ __all__ = [
     "FeatureInputError",
     "FeatureState",
     "ImportFeature",
+    "MeshSketchFeature",
     "ParamSpec",
     "PrimitiveDetectFeature",
     "RemoveFeatureCommand",

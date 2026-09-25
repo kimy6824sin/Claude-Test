@@ -28,7 +28,7 @@ from OCP.BRepPrimAPI import (
     BRepPrimAPI_MakeSphere,
 )
 from OCP.GC import GC_MakeArcOfCircle
-from OCP.gp import gp_Ax1, gp_Ax2, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
+from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.STEPControl import STEPControl_AsIs, STEPControl_Reader, STEPControl_Writer
@@ -38,7 +38,7 @@ from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Compound
 
 from meshrev.core.cad.kernel import BooleanOp, CadKernel, Shape
-from meshrev.core.section.sketch import Arc2D, Line2D, Sketch
+from meshrev.core.section.sketch import Arc2D, Circle2D, Line2D, Sketch, loop_polyline
 from meshrev.core.types import Axis, BBox, FloatArray, as_vec3
 
 if TYPE_CHECKING:
@@ -62,22 +62,43 @@ class OccKernel(CadKernel):
     name = "OpenCASCADE"
 
     # -- modelling --------------------------------------------------------------------
-    def _sketch_face(self, sketch: Sketch) -> Any:
-        if not sketch.is_closed(tol=1e-6):
-            raise ValueError("sketch profile must be closed")
+    def _wire(self, plane, entities, ccw: bool) -> Any:
+        """Wire of a closed loop, oriented counter-clockwise (``ccw``) or clockwise
+        in the sketch frame; OCC needs holes opposite to the outer boundary."""
         wire = BRepBuilderAPI_MakeWire()
-        for entity in sketch.entities:
+        for entity in entities:
             if isinstance(entity, Line2D):
-                a, b = sketch.plane.to_world([entity.start, entity.end])
+                a, b = plane.to_world([entity.start, entity.end])
                 edge = BRepBuilderAPI_MakeEdge(_pnt(a), _pnt(b)).Edge()
             elif isinstance(entity, Arc2D):
-                a, m, b = sketch.plane.to_world([entity.start, entity.mid, entity.end])
+                a, m, b = plane.to_world([entity.start, entity.mid, entity.end])
                 curve = GC_MakeArcOfCircle(_pnt(a), _pnt(m), _pnt(b)).Value()
                 edge = BRepBuilderAPI_MakeEdge(curve).Edge()
+            elif isinstance(entity, Circle2D):
+                (center,) = plane.to_world([entity.center])
+                circ = gp_Circ(gp_Ax2(_pnt(center), _dir(plane.normal)), entity.radius)
+                edge = BRepBuilderAPI_MakeEdge(circ).Edge()
             else:  # pragma: no cover - exhaustive over SketchEntity
                 raise TypeError(f"unsupported sketch entity {entity!r}")
             wire.Add(edge)
-        return BRepBuilderAPI_MakeFace(wire.Wire()).Face()
+        if not wire.IsDone():
+            raise ValueError("sketch loop is not a connected wire")
+        result = wire.Wire()
+        uv = loop_polyline(entities)
+        x, y = uv[:, 0], uv[:, 1]
+        area = 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+        if (area > 0) != ccw:
+            result = _static(TopoDS, "Wire")(result.Reversed())
+        return result
+
+    def _sketch_face(self, sketch: Sketch) -> Any:
+        """Planar face bounded by the outer loop with the inner loops as holes."""
+        if not sketch.is_closed(tol=1e-6):
+            raise ValueError("sketch profile must be closed")
+        maker = BRepBuilderAPI_MakeFace(self._wire(sketch.plane, sketch.entities, ccw=True))
+        for hole in sketch.holes:
+            maker.Add(self._wire(sketch.plane, hole, ccw=False))
+        return maker.Face()
 
     def revolve(self, sketch: Sketch, axis: Axis, angle_deg: float = 360.0) -> Shape:
         face = self._sketch_face(sketch)

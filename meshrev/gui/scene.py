@@ -17,6 +17,9 @@ from meshrev.gui.display import HIGHLIGHT_COLOR, DisplayMode, apply_display_mode
 
 HIGHLIGHT_NAME = "__highlight__"
 REGION_RGB = "region_rgb"
+SKETCH_RGB = "sketch_rgb"
+# line: blue, arc: magenta, circle: orange (indexed by SketchBody entity_type)
+SKETCH_COLORS = np.array([[25, 115, 240], [210, 40, 170], [245, 140, 20]], dtype=np.uint8)
 
 
 @dataclass(eq=False)
@@ -27,6 +30,7 @@ class BodyVisual:
     surface: vtk.vtkActor | None = None  # the actor display modes apply to
     mesh: pv.PolyData | None = None  # rendered dataset (carries orig_cell_id)
     datum: vtk.vtkActor | None = None  # datum geometry actor (selection highlight)
+    overlay: list[vtk.vtkProp] = field(default_factory=list)  # drawn on top of everything
     base_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     _locator: vtk.vtkStaticCellLocator | None = None
 
@@ -60,6 +64,7 @@ class SceneManager:
             BodyKind.REGIONS: self._build_regions,
             BodyKind.DATUM_AXIS: self._build_datum_axis,
             BodyKind.DATUM_PLANE: self._build_datum_plane,
+            BodyKind.SKETCH: self._build_sketch,
         }
 
     # -- registration -----------------------------------------------------------------
@@ -94,7 +99,10 @@ class SceneManager:
             return
         for actor in visual.actors:
             self._actor_owner.pop(id(actor), None)
-            self.plotter.remove_actor(actor, render=False)
+            if actor in visual.overlay:
+                self._overlay_renderer().RemoveActor(actor)
+            else:
+                self.plotter.remove_actor(actor, render=False)
         if self._highlight and self._highlight[0] == body_id:
             self._remove_highlight_actor()
         if render:
@@ -335,6 +343,81 @@ class SceneManager:
             body.id, body.kind, [actor, label], datum=actor, base_color=tuple(body.color)
         )
 
+    def _build_sketch(self, body: Body) -> BodyVisual:
+        """Fitted sketch: entities coloured by type, vertices as dots, ASCII tag."""
+        poly = body.to_polydata()
+        if poly.n_points == 0:
+            return BodyVisual(body.id, body.kind)
+        poly.cell_data[SKETCH_RGB] = SKETCH_COLORS[poly.cell_data["entity_type"]]
+        actor = self.plotter.add_mesh(
+            poly,
+            scalars=SKETCH_RGB,
+            rgb=True,
+            preference="cell",
+            line_width=4,
+            render_lines_as_tubes=True,
+            name=f"body:{body.id}",
+            reset_camera=False,
+            show_scalar_bar=False,
+            render=False,
+        )
+        ends = []
+        for loop in body.result.loops:
+            for entity in loop.entities:
+                ends.extend([entity.start, entity.end])
+        dots = self.plotter.add_mesh(
+            pv.PolyData(body.result.plane.to_world(np.asarray(ends))),
+            color="black",
+            point_size=7,
+            render_points_as_spheres=True,
+            name=f"verts:{body.id}",
+            reset_camera=False,
+            pickable=False,
+            render=False,
+        )
+        label = self._label(body, poly.points[int(np.argmax(poly.points @ np.ones(3)))])
+        visual = BodyVisual(body.id, body.kind, [actor, dots, label], datum=None)
+        self._to_overlay(visual, [actor, dots])
+        return visual
+
+    def _overlay_renderer(self) -> vtk.vtkRenderer:
+        """Second render layer sharing the camera: its props are never hidden by
+        the mesh (sketch curves cut through the middle of a part stay visible)."""
+        if getattr(self, "_overlay", None) is None:
+            window = self.plotter.render_window
+            overlay = vtk.vtkRenderer()
+            overlay.SetLayer(1)
+            overlay.InteractiveOff()
+            overlay.SetActiveCamera(self.plotter.renderer.GetActiveCamera())
+            window.SetNumberOfLayers(max(2, window.GetNumberOfLayers()))
+            window.AddRenderer(overlay)
+            self._overlay = overlay
+        return self._overlay
+
+    def _to_overlay(self, visual: BodyVisual, actors: list[vtk.vtkProp]) -> None:
+        if self.plotter.render_window is None:
+            return  # closed/off-screen-less plotter: keep them in the main layer
+        overlay = self._overlay_renderer()
+        for actor in actors:
+            self.plotter.renderer.RemoveActor(actor)
+            overlay.AddActor(actor)
+            visual.overlay.append(actor)
+
+    def look_at_plane(self, plane, bounds: BBox | None = None) -> None:
+        """Camera normal to a sketch plane, sketch x axis to the right."""
+        u, v = plane.basis()
+        center = bounds.center if bounds is not None else plane.origin
+        center = center - ((center - plane.origin) @ plane.normal) * plane.normal
+        distance = 2.0 * (bounds.diagonal if bounds is not None else 100.0)
+        self.plotter.camera_position = [
+            tuple(center + distance * plane.normal),
+            tuple(center),
+            tuple(v),
+        ]
+        if bounds is not None:
+            self.plotter.reset_camera(bounds=bounds.bounds, render=False)
+        self.render()
+
     def _build_lines(self, body: Body) -> BodyVisual:
         data = body.to_polydata()
         if data.n_points == 0:
@@ -343,9 +426,9 @@ class SceneManager:
             data,
             color=body.color,
             name=f"body:{body.id}",
-            line_width=3,
-            render_lines_as_tubes=True,
+            line_width=1.5,
             reset_camera=False,
+            pickable=False,
             render=False,
         )
         return BodyVisual(body.id, body.kind, [actor])

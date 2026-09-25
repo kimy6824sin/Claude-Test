@@ -28,12 +28,13 @@ from PySide6.QtWidgets import (
 
 from meshrev import __version__
 from meshrev import io as mio
-from meshrev.core.bodies import BodyKind
+from meshrev.core.bodies import BodyKind, DatumAxisBody, SketchBody
 from meshrev.gui.camera import InteractionPreset, StandardView
 from meshrev.gui.controller import DocumentController, Selection
 from meshrev.gui.display import DisplayMode
 from meshrev.gui.feature_tree import FeatureTree
 from meshrev.gui.property_panel import PropertyPanel
+from meshrev.gui.sketch_dialog import MeshSketchDialog
 from meshrev.gui.viewport import Viewport3D
 
 MAX_RECENT = 10
@@ -210,6 +211,13 @@ class MainWindow(QMainWindow):
             "Ctrl+Shift+P",
             tip="用所选区域拟合平面并生成基准平面",
         )
+        self.act_mesh_sketch = self._action(
+            "网格草图…",
+            self._mesh_sketch_dialog,
+            "Ctrl+Shift+K",
+            tip="平面截取网格并自动拟合直线/圆弧/圆，可在所选基准面或基准轴上创建",
+        )
+        self.act_look_sketch = self._action("正视于草图", self._look_at_selected_sketch)
         self.scheme_group = QActionGroup(self)
         self.scheme_actions: dict[str, QAction] = {}
         for scheme, text in (("region", "按区域着色"), ("type", "按基元类型着色")):
@@ -259,6 +267,8 @@ class MainWindow(QMainWindow):
         self.tools_menu.addSeparator()
         self.tools_menu.addActions([self.act_datum_axis, self.act_datum_plane])
         self.tools_menu.addSeparator()
+        self.tools_menu.addActions([self.act_mesh_sketch, self.act_look_sketch])
+        self.tools_menu.addSeparator()
         self.tools_menu.addActions(list(self.scheme_actions.values()))
 
         help_menu = bar.addMenu("帮助(&H)")
@@ -267,7 +277,14 @@ class MainWindow(QMainWindow):
         self.feature_tree.set_context_actions("feature", [self.act_suppress, self.act_delete])
         self.feature_tree.set_context_actions(
             "body",
-            [self.act_toggle_visible, self.act_export_body, self.act_segment, self.act_ransac],
+            [
+                self.act_toggle_visible,
+                self.act_export_body,
+                self.act_segment,
+                self.act_ransac,
+                self.act_mesh_sketch,
+                self.act_look_sketch,
+            ],
         )
         self.feature_tree.set_context_actions("region", [self.act_datum_axis, self.act_datum_plane])
 
@@ -294,7 +311,13 @@ class MainWindow(QMainWindow):
         tools_bar.setObjectName("toolbar_recognition")
         tools_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         tools_bar.addActions(
-            [self.act_segment, self.act_ransac, self.act_datum_axis, self.act_datum_plane]
+            [
+                self.act_segment,
+                self.act_ransac,
+                self.act_datum_axis,
+                self.act_datum_plane,
+                self.act_mesh_sketch,
+            ]
         )
         self.addToolBar(tools_bar)
         self.tools_toolbar = tools_bar
@@ -335,7 +358,29 @@ class MainWindow(QMainWindow):
         self.viewport.add_body(body)
         if first:
             self.viewport.set_standard_view(StandardView.ISOMETRIC)
+        elif isinstance(body, SketchBody):
+            self._look_at_sketch(body)
         self._update_stats()
+
+    def _mesh_sketch_dialog(self) -> None:
+        datum = self.controller.selected_datum()
+        dialog = MeshSketchDialog(
+            datum.name if datum else None, isinstance(datum, DatumAxisBody), self
+        )
+        if dialog.exec():
+            self.controller.create_mesh_sketch(dialog.params())
+
+    def _look_at_sketch(self, body: SketchBody) -> None:
+        box = body.bounds()
+        self.viewport.scene.look_at_plane(body.result.plane, box)
+
+    def _look_at_selected_sketch(self) -> None:
+        document = self.controller.document
+        body = document.find(self.controller.selection.body_id or "")
+        sketches = document.bodies_of_type(SketchBody)
+        target = body if isinstance(body, SketchBody) else (sketches[-1] if sketches else None)
+        if target is not None:
+            self._look_at_sketch(target)
 
     def _on_body_removed(self, body_id: str) -> None:
         self.viewport.remove_body(body_id)

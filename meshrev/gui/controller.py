@@ -11,7 +11,13 @@ from typing import Any
 from PySide6.QtCore import QObject, QThreadPool, Signal, Slot
 
 from meshrev import io as mio
-from meshrev.core.bodies import Body, MeshBody, RegionSetBody
+from meshrev.core.bodies import (
+    Body,
+    DatumAxisBody,
+    DatumPlaneBody,
+    MeshBody,
+    RegionSetBody,
+)
 from meshrev.core.document import (
     BODY_ADDED,
     BODY_CHANGED,
@@ -30,6 +36,7 @@ from meshrev.core.features import (
     Feature,
     FeatureContext,
     ImportFeature,
+    MeshSketchFeature,
     PrimitiveDetectFeature,
     RemoveFeatureCommand,
     SuppressFeatureCommand,
@@ -312,6 +319,30 @@ class DocumentController(QObject):
             name=f"{cls.label} {count}",
         )
         self.add_feature(feature)
+        return True
+
+    def selected_datum(self) -> DatumAxisBody | DatumPlaneBody | None:
+        body = self.document.find(self._selection.body_id) if self._selection.body_id else None
+        return body if isinstance(body, (DatumAxisBody, DatumPlaneBody)) else None
+
+    def create_mesh_sketch(
+        self, params: dict[str, Any], mesh_id: str | None = None, background: bool = True
+    ) -> bool:
+        """Mesh sketch on a standard plane or on the selected datum plane/axis."""
+        mesh_id = mesh_id or self.target_mesh_id()
+        if mesh_id is None:
+            self.errorOccurred.emit("网格草图", "文档中没有网格")
+            return False
+        inputs = [mesh_id]
+        if params.get("plane") == "datum":
+            datum = self.selected_datum()
+            if datum is None:
+                self.errorOccurred.emit("网格草图", "请先选择一个基准平面或基准轴")
+                return False
+            inputs.append(datum.id)
+        count = sum(isinstance(f, MeshSketchFeature) for f in self.document.history) + 1
+        feature = MeshSketchFeature(inputs=inputs, params=params, name=f"网格草图 {count}")
+        self.add_feature(feature, background=background)
         return True
 
     def set_region_color_scheme(self, scheme: str) -> None:

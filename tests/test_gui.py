@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import pyvista as pv
 
@@ -95,3 +96,25 @@ def test_segmentation_workflow(window, qtbot):
     controller.undo()  # segmentation
     assert not controller.document.bodies_of_type(RegionSetBody)
     assert mesh.visible
+
+
+def test_mesh_sketch_workflow(window):
+    from meshrev.core.bodies import SketchBody
+    from meshrev.core.features import ImportFeature
+    from meshrev.core.samples import make_capped_cylinder
+
+    controller = window.controller
+    controller.document.history.append(
+        ImportFeature("cyl.stl", bodies=[MeshBody(make_capped_cylinder(), "cyl")])
+    )
+    assert controller.create_mesh_sketch({"plane": "yz"})
+    assert controller.wait_for_tasks(60000)
+    (sketch,) = controller.document.bodies_of_type(SketchBody)
+    visual = window.viewport.scene.visual(sketch.id)
+    assert visual is not None and visual.overlay  # drawn on top of the mesh
+    camera = window.viewport.camera
+    view = np.subtract(camera.position, camera.focal_point)
+    assert abs(view[0]) / np.linalg.norm(view) == pytest.approx(1.0, abs=1e-6)  # normal to YZ
+    controller.undo()
+    assert not controller.document.bodies_of_type(SketchBody)
+    assert window.viewport.scene.visual(sketch.id) is None

@@ -13,3 +13,5 @@ dist/
 *.step
 *.stp
 !tests/data/**
+# sample models shipped in the repository root (3.stl ... 6.stl)
+!/[0-9]*.stl

@@ -30,6 +30,7 @@ class BodyKind(str, Enum):
     REGIONS = "regions"
     DATUM_AXIS = "datum_axis"
     DATUM_PLANE = "datum_plane"
+    SKETCH = "sketch"
 
 
 def _fmt(value: float, digits: int = 4) -> str:
@@ -363,4 +364,65 @@ class DatumPlaneBody(Body):
         info["中心点"] = format_vec(self.plane.origin, 4)
         if self.rms is not None:
             info["拟合 RMS"] = f"{self.rms:.5f}"
+        return info
+
+
+ENTITY_CODES = {"line": 0, "arc": 1, "circle": 2}
+
+
+class SketchBody(Body):
+    """Fitted mesh sketch: structured lines/arcs/circles on a plane."""
+
+    kind = BodyKind.SKETCH
+    default_color = (0.10, 0.45, 0.95)
+    tag_prefix = "S"
+
+    def __init__(self, result, name: str, **kwargs) -> None:
+        super().__init__(name, **kwargs)
+        self.result = result  # meshrev.core.sketch_fit.SketchFitResult
+
+    def to_polydata(self, arc_segments: int = 48) -> pv.PolyData:
+        """One polyline cell per entity with ``entity_type`` (0 line, 1 arc, 2 circle)."""
+        from meshrev.core.section.sketch import Arc2D, Circle2D
+
+        points, lines, codes, offset = [], [], [], 0
+        plane = self.result.plane
+        for loop in self.result.loops:
+            for entity in loop.entities:
+                uv = entity.sample(arc_segments if isinstance(entity, (Arc2D, Circle2D)) else 2)
+                pts = plane.to_world(uv)
+                points.append(pts)
+                lines.append(np.r_[len(pts), np.arange(offset, offset + len(pts))])
+                offset += len(pts)
+                kind = (
+                    "circle"
+                    if isinstance(entity, Circle2D)
+                    else ("arc" if isinstance(entity, Arc2D) else "line")
+                )
+                codes.append(ENTITY_CODES[kind])
+        if not points:
+            return pv.PolyData()
+        poly = pv.PolyData(np.vstack(points), lines=np.concatenate(lines))
+        poly.cell_data["entity_type"] = np.array(codes, dtype=np.int8)
+        return poly
+
+    def info(self) -> dict[str, str]:
+        info = super().info()
+        result = self.result
+        counts = result.counts()
+        info["草图平面"] = format_plane_equation(*result.plane.equation, digits=4)
+        info["轮廓数"] = str(len(result.loops))
+        info["外轮廓 / 孔 / 开放"] = " / ".join(
+            str(n)
+            for n in (
+                sum(lp.closed and not lp.is_hole for lp in result.loops),
+                sum(lp.is_hole for lp in result.loops),
+                sum(not lp.closed for lp in result.loops),
+            )
+        )
+        info["直线 / 圆弧 / 整圆"] = f"{counts['line']} / {counts['arc']} / {counts['circle']}"
+        info["拟合公差"] = f"{result.tolerance:.4f}"
+        info["最大偏差"] = f"{result.max_deviation:.4f}"
+        for k, text in enumerate(result.describe(limit=80)):
+            info[f"#{k:02d}"] = text.strip()
         return info
