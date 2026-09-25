@@ -1081,3 +1081,102 @@ def sketch_to_world(result: SketchFitResult, arc_segments: int = 48) -> list[Flo
     return [
         result.plane.to_world(loop_polyline(loop.entities, arc_segments)) for loop in result.loops
     ]
+
+
+# ======================================================================================
+# Half profiles for revolved features
+# ======================================================================================
+def split_loop_at_axis(
+    points: FloatArray, side: float = 1.0, eps: float = 1e-9
+) -> list[FloatArray]:
+    """Part(s) of a closed 2D loop with ``side * v >= 0`` (the axis is ``v = 0``).
+
+    A revolve needs the *half* section on one side of the axis. The loop is cut
+    where it crosses the axis; every piece on the kept side runs from an entry
+    crossing to an exit crossing. For a simple polygon, the stretches of the
+    axis inside the polygon lie between consecutive crossings sorted along ``u``
+    (pairs (0,1), (2,3), ... - even-odd rule), so each piece is closed by
+    following the axis to the partner crossing and continuing with the piece
+    that starts there, until the region is closed.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    v = side * pts[:, 1]
+    inside = v >= -eps
+    if inside.all():
+        return [pts]
+    if not inside.any():
+        return []
+    n = len(pts)
+    start = int(np.argmin(inside))  # an outside vertex
+    order = np.r_[start:n, 0:start]
+    pts, v, inside = pts[order], v[order], inside[order]
+
+    crossings: list[FloatArray] = []
+    chains: list[tuple[int, int, list[FloatArray]]] = []  # (entry id, exit id, points)
+    current: list[FloatArray] | None = None
+    entry = -1
+    for i in range(n):
+        a, b = i, (i + 1) % n
+        if inside[a] != inside[b]:
+            t = v[a] / (v[a] - v[b]) if v[a] != v[b] else 0.0
+            c = pts[a] + t * (pts[b] - pts[a])
+            c = np.array([c[0], 0.0])
+            crossings.append(c)
+            cid = len(crossings) - 1
+            if inside[b]:  # entering the kept side
+                current, entry = [c], cid
+            else:  # leaving
+                assert current is not None
+                current.append(c)
+                chains.append((entry, cid, current))
+                current = None
+        if inside[b] and current is not None:
+            current.append(pts[b])
+    # pair crossings along the axis (even-odd)
+    by_u = sorted(range(len(crossings)), key=lambda k: crossings[k][0])
+    partner = {}
+    for k in range(0, len(by_u) - 1, 2):
+        partner[by_u[k]] = by_u[k + 1]
+        partner[by_u[k + 1]] = by_u[k]
+    chain_from_entry = {c[0]: c for c in chains}
+    used: set[int] = set()
+    regions: list[FloatArray] = []
+    for chain in chains:
+        if chain[0] in used:
+            continue
+        region: list[FloatArray] = []
+        cur = chain
+        while cur is not None and cur[0] not in used:
+            used.add(cur[0])
+            region.extend(cur[2])
+            nxt_entry = partner.get(cur[1])
+            cur = chain_from_entry.get(nxt_entry) if nxt_entry is not None else None
+        pts_region = np.array(region)
+        keep = np.r_[True, np.linalg.norm(np.diff(pts_region, axis=0), axis=1) > eps]
+        pts_region = pts_region[keep]
+        if len(pts_region) >= 3 and abs(polygon_area(pts_region)) > eps:
+            regions.append(pts_region)
+    return regions
+
+
+def half_profile(
+    result: SketchFitResult, side: float = 1.0, options: SketchFitOptions | None = None
+) -> SketchFitResult:
+    """Refit the part of a sketch on one side of its ``u`` axis (``v = 0``).
+
+    For a sketch made on a plane *through* a datum axis (``plane_through_axis``)
+    the ``u`` axis is the rotation axis, so the result is the revolve profile.
+    The measured loop points are split at the axis and fitted again with the
+    same tolerance; the cut along the axis becomes a straight line.
+    """
+    loops, flags = [], []
+    for loop in result.loops:
+        if not loop.closed:
+            continue
+        for piece in split_loop_at_axis(loop.points, side):
+            loops.append(piece)
+            flags.append(True)
+    opts = options or SketchFitOptions(tolerance=result.tolerance)
+    if opts.tolerance is None:
+        opts.tolerance = result.tolerance
+    return fit_profiles_2d(loops, flags, result.plane, opts)

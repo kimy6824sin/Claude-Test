@@ -68,6 +68,9 @@ class Body(ABC):
         self.color: RGB = color or self.default_color
         self.visible = visible
         self.source_feature: str | None = None
+        # bodies this one replaces on screen (boolean operands, the mesh under a
+        # region set); the GUI hides them while this body exists
+        self.consumes: list[str] = []
 
     @abstractmethod
     def to_polydata(self) -> pv.PolyData:
@@ -174,9 +177,15 @@ class CadBody(Body):
         info = super().info()
         info["内核"] = self.kernel.name
         try:
-            info["体积"] = f"{self.kernel.volume(self.shape):.2f}"
+            info["体积"] = f"{self.kernel.volume(self.shape):.3f}"
+            counts = self.kernel.topology_counts(self.shape)
+            info["实体 / 面 / 边"] = f"{counts['solids']} / {counts['faces']} / {counts['edges']}"
+            info["B-Rep 有效"] = "是" if self.kernel.is_valid(self.shape) else "否"
         except Exception:  # noqa: BLE001 - informative only
             info["体积"] = "-"
+        box = self.bounds()
+        if box is not None:
+            info["尺寸"] = format_vec(box.size, 3)
         return info
 
 
@@ -225,6 +234,8 @@ class RegionSetBody(Body):
         self.polydata = polydata
         self.segmentation = segmentation
         self.mesh_id = mesh_id
+        if mesh_id:
+            self.consumes = [mesh_id]
         self.color_scheme: ColorScheme = color_scheme
 
     @cached_property

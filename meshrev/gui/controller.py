@@ -17,6 +17,7 @@ from meshrev.core.bodies import (
     DatumPlaneBody,
     MeshBody,
     RegionSetBody,
+    SketchBody,
 )
 from meshrev.core.document import (
     BODY_ADDED,
@@ -29,16 +30,20 @@ from meshrev.core.document import (
 from meshrev.core.features import (
     AddFeatureCommand,
     AutoSegmentFeature,
+    BooleanFeature,
     Command,
+    CylinderFeature,
     DatumAxisFeature,
     DatumPlaneFeature,
     EditParamsCommand,
+    ExtrudeFeature,
     Feature,
     FeatureContext,
     ImportFeature,
     MeshSketchFeature,
     PrimitiveDetectFeature,
     RemoveFeatureCommand,
+    RevolveFeature,
     SuppressFeatureCommand,
     UndoStack,
 )
@@ -94,7 +99,7 @@ class DocumentController(QObject):
         self._pool = QThreadPool.globalInstance()
         self._tasks: dict[int, tuple[FunctionWorker, Callable[[Any], None], str]] = {}
         self._next_task_id = 0
-        self._region_sources: dict[str, str] = {}  # region set id -> source mesh id
+        self._consumed: dict[str, list[str]] = {}  # body id -> bodies it hides
         self.region_color_scheme = "region"
 
     def make_context(self) -> FeatureContext:
@@ -121,22 +126,26 @@ class DocumentController(QObject):
         if isinstance(body, RegionSetBody):
             body.color_scheme = self.region_color_scheme
         self.bodyAdded.emit(body_id)
-        # a region set is drawn on top of its mesh: hide the plain mesh meanwhile
-        if isinstance(body, RegionSetBody) and body.mesh_id in self.document:
-            self._region_sources[body_id] = body.mesh_id
-            self.document.set_visible(body.mesh_id, False)
+        # bodies that replace others on screen (region set over its mesh, boolean
+        # result over its operands) hide what they consume while they exist
+        consumed = [c for c in body.consumes if c in self.document]
+        if consumed:
+            self._consumed[body_id] = consumed
+            for other in consumed:
+                self.document.set_visible(other, False)
 
     def _on_body_removed(self, body_id: str) -> None:
         self.bodyRemoved.emit(body_id)
-        mesh_id = self._region_sources.pop(body_id, None)
-        if mesh_id is not None and mesh_id in self.document:
+        for other in self._consumed.pop(body_id, []):
+            if other not in self.document:
+                continue
             still_covered = any(
-                source == mesh_id and self.document.get(rid).visible
-                for rid, source in self._region_sources.items()
-                if rid in self.document
+                other in ids and self.document.get(owner).visible
+                for owner, ids in self._consumed.items()
+                if owner in self.document
             )
             if not still_covered:
-                self.document.set_visible(mesh_id, True)
+                self.document.set_visible(other, True)
         if self._selection.body_id == body_id:
             self.select(Selection())
 
@@ -344,6 +353,79 @@ class DocumentController(QObject):
         feature = MeshSketchFeature(inputs=inputs, params=params, name=f"网格草图 {count}")
         self.add_feature(feature, background=background)
         return True
+
+    # -- solid modelling -----------------------------------------------------------------
+    def _selected_body(self, cls: type) -> Body | None:
+        body = self.document.find(self._selection.body_id) if self._selection.body_id else None
+        return body if isinstance(body, cls) else None
+
+    def _add_and_select(self, feature: Feature) -> bool:
+        if not self.push(AddFeatureCommand(self.document.history, feature)):
+            return False
+        if feature.state.value == "error":
+            self.errorOccurred.emit(feature.name, feature.error or "失败")
+        self.select(
+            Selection(
+                feature_id=feature.id, body_id=feature.output_ids[0] if feature.output_ids else None
+            )
+        )
+        return True
+
+    def _next_name(self, cls: type) -> str:
+        count = sum(isinstance(f, cls) for f in self.document.history) + 1
+        return f"{cls.label} {count}"
+
+    def extrude_sketch(self, sketch_id: str | None = None, **params: Any) -> bool:
+        sketch = self.document.find(sketch_id) if sketch_id else self._selected_body(SketchBody)
+        if not isinstance(sketch, SketchBody):
+            self.errorOccurred.emit("拉伸", "请先选择一个网格草图")
+            return False
+        return self._add_and_select(
+            ExtrudeFeature(
+                inputs=[sketch.id], params=params or None, name=self._next_name(ExtrudeFeature)
+            )
+        )
+
+    def revolve_sketch(self, sketch_id: str | None = None, **params: Any) -> bool:
+        sketch = self.document.find(sketch_id) if sketch_id else self._selected_body(SketchBody)
+        if not isinstance(sketch, SketchBody):
+            self.errorOccurred.emit("旋转", "请先选择一个过基准轴的网格草图")
+            return False
+        return self._add_and_select(
+            RevolveFeature(
+                inputs=[sketch.id], params=params or None, name=self._next_name(RevolveFeature)
+            )
+        )
+
+    def cylinder_from_axis(self, axis_id: str | None = None, **params: Any) -> bool:
+        axis = self.document.find(axis_id) if axis_id else self._selected_body(DatumAxisBody)
+        if not isinstance(axis, DatumAxisBody):
+            self.errorOccurred.emit("圆柱", "请先选择一个基准轴")
+            return False
+        return self._add_and_select(
+            CylinderFeature(
+                inputs=[axis.id], params=params or None, name=self._next_name(CylinderFeature)
+            )
+        )
+
+    def boolean(self, target_id: str, tool_id: str, operation: str = "cut") -> bool:
+        if target_id == tool_id:
+            self.errorOccurred.emit("布尔运算", "目标与工具必须是不同的实体")
+            return False
+        feature = BooleanFeature(
+            inputs=[target_id, tool_id],
+            params={"operation": operation},
+            name=self._next_name(BooleanFeature),
+        )
+        return self._add_and_select(feature)
+
+    def pin_bore(self, target_id: str, axis_id: str, radius: float = 0.0) -> bool:
+        """Cylinder on the datum axis + boolean cut: a parametric through hole whose
+        radius can be edited afterwards on the cylinder feature."""
+        if not self.cylinder_from_axis(axis_id, radius=radius):
+            return False
+        tool_id = self._selection.body_id
+        return tool_id is not None and self.boolean(target_id, tool_id, "cut")
 
     def set_region_color_scheme(self, scheme: str) -> None:
         self.region_color_scheme = scheme

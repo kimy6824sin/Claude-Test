@@ -1,3 +1,4 @@
-# Optional OpenCASCADE kernel: STEP import/export and solid modelling
+# Optional OpenCASCADE kernel (OCP bindings, same as CadQuery / build123d):
+# B-Rep modelling (extrude / revolve / boolean) and STEP / IGES exchange
 -r requirements.txt
 cadquery-ocp>=7.7

@@ -17,6 +17,12 @@ from meshrev.core.features.commands import (
     UndoStack,
 )
 from meshrev.core.features.history import FeatureHistory
+from meshrev.core.features.modeling import (
+    BooleanFeature,
+    CylinderFeature,
+    ExtrudeFeature,
+    RevolveFeature,
+)
 from meshrev.core.features.recognition import (
     AutoSegmentFeature,
     DatumAxisFeature,
@@ -29,10 +35,13 @@ __all__ = [
     "FEATURE_TYPES",
     "AddFeatureCommand",
     "AutoSegmentFeature",
+    "BooleanFeature",
     "Command",
+    "CylinderFeature",
     "DatumAxisFeature",
     "DatumPlaneFeature",
     "EditParamsCommand",
+    "ExtrudeFeature",
     "Feature",
     "FeatureContext",
     "FeatureHistory",
@@ -43,6 +52,7 @@ __all__ = [
     "ParamSpec",
     "PrimitiveDetectFeature",
     "RemoveFeatureCommand",
+    "RevolveFeature",
     "SectionFeature",
     "SuppressFeatureCommand",
     "UndoStack",

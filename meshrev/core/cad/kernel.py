@@ -58,6 +58,27 @@ class CadKernel(ABC):
     def volume(self, shape: Shape) -> float: ...
 
     @abstractmethod
+    def cylinder(self, axis: Axis, radius: float, length: float) -> Shape:
+        """Solid cylinder centred on ``axis.origin`` (tool for pin bores / holes)."""
+
+    @abstractmethod
+    def fuse_all(self, shapes: Sequence[Shape]) -> Shape: ...
+
+    @abstractmethod
+    def is_valid(self, shape: Shape) -> bool:
+        """Topological/geometric validity check (BRepCheck)."""
+
+    @abstractmethod
+    def topology_counts(self, shape: Shape) -> dict[str, int]:
+        """Number of solids / faces / edges (for the property panel)."""
+
+    @abstractmethod
+    def import_iges(self, path: Path) -> list[Shape]: ...
+
+    @abstractmethod
+    def export_iges(self, shapes: Sequence[Shape], path: Path) -> None: ...
+
+    @abstractmethod
     def import_step(self, path: Path) -> list[Shape]: ...
 
     @abstractmethod

@@ -19,6 +19,7 @@ from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeFace,
     BRepBuilderAPI_MakeWire,
 )
+from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import (
@@ -31,8 +32,10 @@ from OCP.GC import GC_MakeArcOfCircle
 from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
+from OCP.IGESControl import IGESControl_Reader, IGESControl_Writer
+from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_AsIs, STEPControl_Reader, STEPControl_Writer
-from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Compound
@@ -138,6 +141,35 @@ class OccKernel(CadKernel):
             return BRepBuilderAPI_MakeFace(pln, -half, half, -half, half).Face()
         raise TypeError(f"no solid representation for {type(primitive).__name__}")
 
+    def cylinder(self, axis: Axis, radius: float, length: float) -> Shape:
+        base = axis.origin - 0.5 * length * axis.direction
+        ax2 = gp_Ax2(_pnt(base), _dir(axis.direction))
+        return BRepPrimAPI_MakeCylinder(ax2, float(radius), float(length)).Shape()
+
+    def fuse_all(self, shapes: Sequence[Shape]) -> Shape:
+        shapes = list(shapes)
+        if not shapes:
+            raise ValueError("nothing to fuse")
+        result = shapes[0]
+        for shape in shapes[1:]:
+            result = self.boolean(result, shape, BooleanOp.UNION)
+        return result
+
+    def is_valid(self, shape: Shape) -> bool:
+        return bool(BRepCheck_Analyzer(shape).IsValid())
+
+    def topology_counts(self, shape: Shape) -> dict[str, int]:
+        counts = {}
+        kinds = (("solids", TopAbs_SOLID), ("faces", TopAbs_FACE), ("edges", TopAbs_EDGE))
+        for name, kind in kinds:
+            explorer = TopExp_Explorer(shape, kind)
+            n = 0
+            while explorer.More():
+                n += 1
+                explorer.Next()
+            counts[name] = n
+        return counts
+
     # -- queries ----------------------------------------------------------------------
     def tessellate(self, shape: Shape, tolerance: float = 0.05) -> pv.PolyData:
         BRepMesh_IncrementalMesh(shape, tolerance, False, 0.3, True)
@@ -188,18 +220,39 @@ class OccKernel(CadKernel):
         reader.TransferRoots()
         return [reader.Shape(i) for i in range(1, reader.NbShapes() + 1)]
 
-    def export_step(self, shapes: Sequence[Shape], path: Path) -> None:
+    @staticmethod
+    def _compound(shapes: Sequence[Shape]) -> Shape:
         if not shapes:
             raise ValueError("nothing to export")
         if len(shapes) == 1:
-            shape = shapes[0]
-        else:
-            builder = BRep_Builder()
-            shape = TopoDS_Compound()
-            builder.MakeCompound(shape)
-            for s in shapes:
-                builder.Add(shape, s)
+            return shapes[0]
+        builder = BRep_Builder()
+        compound = TopoDS_Compound()
+        builder.MakeCompound(compound)
+        for s in shapes:
+            builder.Add(compound, s)
+        return compound
+
+    def import_iges(self, path: Path) -> list[Shape]:
+        reader = IGESControl_Reader()
+        if reader.ReadFile(str(path)) != IFSelect_RetDone:
+            raise OSError(f"无法读取 IGES 文件: {path}")
+        reader.TransferRoots()
+        return [reader.Shape(i) for i in range(1, reader.NbShapes() + 1)]
+
+    def export_iges(self, shapes: Sequence[Shape], path: Path) -> None:
+        # BRep mode (IGES 186 manifold solids / 510 faces) keeps solids as solids
+        _static(Interface_Static, "SetCVal")("write.iges.unit", "MM")
+        writer = IGESControl_Writer("MM", 1)
+        writer.AddShape(self._compound(shapes))
+        writer.ComputeModel()
+        if not writer.Write(str(path)):
+            raise OSError(f"无法写入 IGES 文件: {path}")
+
+    def export_step(self, shapes: Sequence[Shape], path: Path) -> None:
+        _static(Interface_Static, "SetCVal")("write.step.unit", "MM")
+        _static(Interface_Static, "SetCVal")("write.step.schema", "AP214IS")
         writer = STEPControl_Writer()
-        writer.Transfer(shape, STEPControl_AsIs)
+        writer.Transfer(self._compound(list(shapes)), STEPControl_AsIs)
         if writer.Write(str(path)) != IFSelect_RetDone:
             raise OSError(f"无法写入 STEP 文件: {path}")

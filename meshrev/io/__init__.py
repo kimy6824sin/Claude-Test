@@ -23,6 +23,7 @@ for _reader in (
     mesh_formats.OBJ_READER,
     mesh_formats.PLY_READER,
     step_format.StepReader(),
+    step_format.IgesReader(),
 ):
     register_reader(_reader)
 for _writer in (
@@ -30,6 +31,7 @@ for _writer in (
     mesh_formats.OBJ_WRITER,
     mesh_formats.PLY_WRITER,
     step_format.StepWriter(),
+    step_format.IgesWriter(),
 ):
     register_writer(_writer)
 

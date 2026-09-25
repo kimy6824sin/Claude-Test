@@ -118,3 +118,42 @@ def test_mesh_sketch_workflow(window):
     controller.undo()
     assert not controller.document.bodies_of_type(SketchBody)
     assert window.viewport.scene.visual(sketch.id) is None
+
+
+@pytest.mark.cad
+def test_modeling_workflow_with_live_parameter_edit(window, qtbot):
+    from meshrev.core.bodies import CadBody, DatumAxisBody, SketchBody
+    from meshrev.core.features import ImportFeature
+    from meshrev.core.samples import make_capped_cylinder
+    from meshrev.core.types import Axis
+    from meshrev.gui.controller import Selection
+
+    c = window.controller
+    c.document.history.append(
+        ImportFeature("cyl.stl", bodies=[MeshBody(make_capped_cylinder(10.0, 20.0), "cyl")])
+    )
+    assert c.create_mesh_sketch({"plane": "xy"}, background=False)
+    (sketch,) = c.document.bodies_of_type(SketchBody)
+    c.select(Selection(sketch.source_feature, sketch.id))
+    assert c.extrude_sketch(distance=8.0)
+    (block,) = c.document.bodies_of_type(CadBody)
+    axis = DatumAxisBody(Axis((0, 0, 4), (1, 0, 0)), 20.0, "hole", radius=2.0)
+    c.document.add_body(axis)
+    assert c.pin_bore(block.id, axis.id)
+    solids = c.document.bodies_of_type(CadBody)
+    result = next(b for b in solids if b.consumes)
+    assert not block.visible and result.visible  # operands hidden behind the result
+    volume = result.kernel.volume(result.shape)
+
+    cylinder = next(f for f in c.document.history if f.type_name == "Cylinder")
+    c.select(Selection(feature_id=cylinder.id))
+    editor = window.property_panel.editor
+    editor.live.setChecked(True)
+    editor._widgets["radius"][1].setValue(3.0)
+    qtbot.waitUntil(lambda: cylinder.params["radius"] == 3.0, timeout=3000)
+    result = c.document.get(result.id)
+    assert result.kernel.volume(result.shape) < volume
+
+    c.undo()  # radius edit
+    c.undo()  # boolean
+    assert block.visible

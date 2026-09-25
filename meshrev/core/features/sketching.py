@@ -37,7 +37,9 @@ def plane_through_axis(axis: Axis, angle_deg: float = 0.0) -> Plane:
     """Plane containing ``axis`` (sketch x = axis direction), rotated by ``angle_deg``
     around it - the natural sketch plane for revolved parts (piston profile)."""
     d = axis.direction
-    ref = np.eye(3)[int(np.argmin(np.abs(d)))]  # world axis least aligned with d
+    # deterministic angle reference: world X unless the axis is (nearly) X, then Y.
+    # (argmin(|d|) would flip between X and Y for a fitted, slightly tilted Z axis)
+    ref = np.array([1.0, 0.0, 0.0]) if abs(d[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     n0 = np.cross(d, ref)
     n0 /= np.linalg.norm(n0)
     m0 = np.cross(d, n0)

@@ -33,6 +33,7 @@ from meshrev.gui.camera import InteractionPreset, StandardView
 from meshrev.gui.controller import DocumentController, Selection
 from meshrev.gui.display import DisplayMode
 from meshrev.gui.feature_tree import FeatureTree
+from meshrev.gui.modeling_dialogs import BooleanDialog, PinBoreDialog
 from meshrev.gui.property_panel import PropertyPanel
 from meshrev.gui.sketch_dialog import MeshSketchDialog
 from meshrev.gui.viewport import Viewport3D
@@ -218,6 +219,26 @@ class MainWindow(QMainWindow):
             tip="平面截取网格并自动拟合直线/圆弧/圆，可在所选基准面或基准轴上创建",
         )
         self.act_look_sketch = self._action("正视于草图", self._look_at_selected_sketch)
+        self.act_extrude = self._action(
+            "拉伸",
+            lambda: c.extrude_sketch(),
+            "Ctrl+Shift+E",
+            tip="将所选草图的闭合区域沿法向拉伸成实体",
+        )
+        self.act_revolve = self._action(
+            "旋转",
+            lambda: c.revolve_sketch(),
+            "Ctrl+Shift+V",
+            tip="取所选（过基准轴的）草图的半截面，绕草图 u 轴旋转 360°",
+        )
+        self.act_cylinder = self._action("圆柱（由基准轴）", lambda: c.cylinder_from_axis())
+        self.act_boolean = self._action("布尔运算…", self._boolean_dialog, "Ctrl+Shift+B")
+        self.act_pin_bore = self._action(
+            "由基准轴挖孔…",
+            self._pin_bore_dialog,
+            tip="圆柱 + 求差，孔半径可在圆柱特征中修改并自动重建",
+        )
+        self.act_export_cad = self._action("导出 CAD（STEP / IGES）…", self._export_cad_dialog)
         self.scheme_group = QActionGroup(self)
         self.scheme_actions: dict[str, QAction] = {}
         for scheme, text in (("region", "按区域着色"), ("type", "按基元类型着色")):
@@ -271,6 +292,14 @@ class MainWindow(QMainWindow):
         self.tools_menu.addSeparator()
         self.tools_menu.addActions(list(self.scheme_actions.values()))
 
+        model_menu = bar.addMenu("建模(&M)")
+        model_menu.addActions([self.act_extrude, self.act_revolve])
+        model_menu.addSeparator()
+        model_menu.addActions([self.act_cylinder, self.act_pin_bore, self.act_boolean])
+        model_menu.addSeparator()
+        model_menu.addAction(self.act_export_cad)
+        self.model_menu = model_menu
+
         help_menu = bar.addMenu("帮助(&H)")
         help_menu.addActions([self.act_mouse_help, self.act_about])
 
@@ -322,6 +351,14 @@ class MainWindow(QMainWindow):
         self.addToolBar(tools_bar)
         self.tools_toolbar = tools_bar
 
+        model_bar = QToolBar("建模", self)
+        model_bar.setObjectName("toolbar_modeling")
+        model_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        model_bar.addActions(
+            [self.act_extrude, self.act_revolve, self.act_pin_bore, self.act_boolean]
+        )
+        self.addToolBar(model_bar)
+
     def _build_statusbar(self) -> None:
         status = self.statusBar()
         self.progress = QProgressBar()
@@ -369,6 +406,44 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec():
             self.controller.create_mesh_sketch(dialog.params())
+
+    def _cad_bodies(self) -> list:
+        return [b for b in self.controller.document.bodies() if b.kind is BodyKind.CAD]
+
+    def _boolean_dialog(self) -> None:
+        solids = self._cad_bodies()
+        if len(solids) < 2:
+            QMessageBox.information(self, "布尔运算", "需要至少两个 CAD 实体")
+            return
+        dialog = BooleanDialog(solids, self.controller.selection.body_id, self)
+        if dialog.exec():
+            self.controller.boolean(*dialog.values())
+
+    def _pin_bore_dialog(self) -> None:
+        solids = self._cad_bodies()
+        axes = self.controller.document.bodies_of_type(DatumAxisBody)
+        if not solids or not axes:
+            QMessageBox.information(self, "挖孔", "需要一个 CAD 实体和一个基准轴")
+            return
+        dialog = PinBoreDialog(solids, axes, self.controller.selection.body_id, self)
+        if dialog.exec():
+            target, axis, radius = dialog.values()
+            self.controller.pin_bore(target, axis, radius)
+
+    def _export_cad_dialog(self) -> None:
+        solids = [b for b in self._cad_bodies() if b.visible] or self._cad_bodies()
+        if not solids:
+            QMessageBox.information(self, "导出 CAD", "文档中没有 CAD 实体")
+            return
+        start = self.settings.value("last_dir", str(Path.home()))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 CAD", start, "STEP (*.step *.stp);;IGES (*.iges *.igs)"
+        )
+        if path:
+            try:
+                self.controller.export_bodies(path, [b.id for b in solids])
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "导出失败", str(exc))
 
     def _look_at_sketch(self, body: SketchBody) -> None:
         box = body.bounds()

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QHeaderView,
     QLineEdit,
     QPushButton,
@@ -36,9 +37,19 @@ class ParamEditor(QGroupBox):
         super().__init__("参数", parent)
         self._form = QFormLayout()
         self._apply = QPushButton("应用并重新生成")
+        self.live = QCheckBox("实时重建")
+        self.live.setToolTip("参数一改动（停顿 0.4 s 后）就自动重建模型")
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(400)
+        self._timer.timeout.connect(self._apply.click)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.live)
+        buttons.addStretch(1)
+        buttons.addWidget(self._apply)
         layout = QVBoxLayout(self)
         layout.addLayout(self._form)
-        layout.addWidget(self._apply, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(buttons)
         self._widgets: dict[str, tuple[ParamSpec, QWidget]] = {}
         self.feature: Feature | None = None
         self.apply_button = self._apply
@@ -54,11 +65,23 @@ class ParamEditor(QGroupBox):
             widget = self._make_widget(spec, feature.params.get(spec.name, spec.default))
             widget.setToolTip(spec.tooltip)
             widget.setEnabled(not spec.readonly)
+            self._watch(widget)
             editable |= not spec.readonly
             self._form.addRow(spec.label, widget)
             self._widgets[spec.name] = (spec, widget)
         self.setVisible(bool(specs))
         self._apply.setVisible(editable)
+        self.live.setVisible(editable)
+
+    def _changed(self, *_args) -> None:
+        if self.live.isChecked():
+            self._timer.start()
+
+    def _watch(self, widget: QWidget) -> None:
+        for signal in ("valueChanged", "toggled", "currentIndexChanged", "editingFinished"):
+            if hasattr(widget, signal):
+                getattr(widget, signal).connect(self._changed)
+                return
 
     @staticmethod
     def _make_widget(spec: ParamSpec, value: Any) -> QWidget:
