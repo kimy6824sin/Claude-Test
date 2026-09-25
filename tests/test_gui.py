@@ -58,3 +58,40 @@ def test_click_picks_body(window, qtbot):
     body_id, cell, _additive = blocker.args
     assert body_id == window.controller.document.bodies()[0].id and cell >= 0
     assert window.controller.selection.body_id == body_id
+
+
+def test_segmentation_workflow(window, qtbot):
+    """Auto segment -> region highlight -> datum axis, through the real window."""
+    from meshrev.core.bodies import DatumAxisBody, RegionSetBody
+    from meshrev.core.features import ImportFeature
+    from meshrev.core.samples import make_capped_cylinder
+    from meshrev.gui.controller import Selection
+
+    controller = window.controller
+    controller.document.history.append(
+        ImportFeature("cyl.stl", bodies=[MeshBody(make_capped_cylinder(), "cyl")])
+    )
+    mesh = controller.document.bodies()[0]
+    window.act_segment.trigger()
+    assert controller.wait_for_tasks(60000)
+    (regions,) = controller.document.bodies_of_type(RegionSetBody)
+    assert not mesh.visible  # the coloured region set replaces the plain mesh
+    visual = window.viewport.scene.visual(regions.id)
+    assert visual is not None and "region_rgb" in visual.mesh.cell_data
+
+    side = next(r.id for r in regions.segmentation.regions if r.type.value == "cylinder")
+    controller.select(Selection(regions.source_feature, regions.id, (side,)))
+    assert "__highlight__" in window.viewport.scene.plotter.actors
+    assert window.act_datum_axis.isEnabled()
+    window.act_datum_axis.trigger()
+    (axis,) = controller.document.bodies_of_type(DatumAxisBody)
+    assert abs(axis.axis.direction[2]) == pytest.approx(1.0, abs=1e-6)
+    assert window.viewport.scene.visual(axis.id).datum is not None
+
+    window.scheme_actions["type"].trigger()
+    assert regions.color_scheme == "type"
+
+    controller.undo()  # datum axis
+    controller.undo()  # segmentation
+    assert not controller.document.bodies_of_type(RegionSetBody)
+    assert mesh.visible

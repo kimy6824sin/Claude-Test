@@ -16,6 +16,7 @@ from meshrev.gui.camera import StandardView, camera_for_view
 from meshrev.gui.display import HIGHLIGHT_COLOR, DisplayMode, apply_display_mode
 
 HIGHLIGHT_NAME = "__highlight__"
+REGION_RGB = "region_rgb"
 
 
 @dataclass(eq=False)
@@ -25,6 +26,8 @@ class BodyVisual:
     actors: list[vtk.vtkProp] = field(default_factory=list)
     surface: vtk.vtkActor | None = None  # the actor display modes apply to
     mesh: pv.PolyData | None = None  # rendered dataset (carries orig_cell_id)
+    datum: vtk.vtkActor | None = None  # datum geometry actor (selection highlight)
+    base_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     _locator: vtk.vtkStaticCellLocator | None = None
 
     @property
@@ -49,10 +52,14 @@ class SceneManager:
         self._visuals: dict[str, BodyVisual] = {}
         self._actor_owner: dict[int, str] = {}
         self._highlight: tuple[str, np.ndarray] | None = None
+        self._selected_body: str | None = None
         self._builders: dict[BodyKind, Builder] = {
             BodyKind.MESH: self._build_surface,
             BodyKind.CAD: self._build_surface,
             BodyKind.SECTION: self._build_lines,
+            BodyKind.REGIONS: self._build_regions,
+            BodyKind.DATUM_AXIS: self._build_datum_axis,
+            BodyKind.DATUM_PLANE: self._build_datum_plane,
         }
 
     # -- registration -----------------------------------------------------------------
@@ -74,6 +81,8 @@ class SceneManager:
             apply_display_mode(visual.surface.GetProperty(), self.display_mode, self.show_edges)
         if self._highlight and self._highlight[0] == body.id:
             self.highlight_cells(body.id, self._highlight[1], render=False)
+        if self._selected_body == body.id:
+            self._style_datum(visual, selected=True)
         self.render()
 
     def update_body(self, body: Body) -> None:
@@ -185,6 +194,23 @@ class SceneManager:
         if render:
             self.render()
 
+    def set_selected_body(self, body_id: str | None) -> None:
+        """Emphasise a selected datum (surfaces are highlighted via cells instead)."""
+        previous, self._selected_body = self._selected_body, body_id
+        for bid in {previous, body_id} - {None}:
+            visual = self._visuals.get(bid)
+            if visual is not None:
+                self._style_datum(visual, selected=bid == body_id)
+        self.render()
+
+    @staticmethod
+    def _style_datum(visual: BodyVisual, selected: bool) -> None:
+        if visual.datum is None:
+            return
+        prop = visual.datum.GetProperty()
+        prop.SetColor(*(HIGHLIGHT_COLOR if selected else visual.base_color))
+        prop.SetLineWidth(7.0 if selected else 4.0)
+
     def clear_highlight(self, render: bool = True) -> None:
         self._highlight = None
         self._remove_highlight_actor()
@@ -240,6 +266,74 @@ class SceneManager:
         )
         actor.GetMapper().ScalarVisibilityOff()
         return BodyVisual(body.id, body.kind, [actor], surface=actor, mesh=mesh)
+
+    def _build_regions(self, body: Body) -> BodyVisual:
+        """Mesh coloured per region (Design X style segment colours)."""
+        mesh = display_mesh(body.to_polydata())
+        mesh.cell_data[REGION_RGB] = body.face_colors()[mesh.cell_data[ORIGINAL_CELL_ID]]
+        actor = self.plotter.add_mesh(
+            mesh,
+            scalars=REGION_RGB,
+            rgb=True,
+            preference="cell",
+            name=f"body:{body.id}",
+            reset_camera=False,
+            show_scalar_bar=False,
+            render=False,
+        )
+        mapper = actor.GetMapper()
+        mapper.SetResolveCoincidentTopologyToPolygonOffset()
+        mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(-1.0, -1.0)
+        return BodyVisual(body.id, body.kind, [actor], surface=actor, mesh=mesh)
+
+    def _label(self, body: Body, position: np.ndarray) -> vtk.vtkActor2D:
+        return self.plotter.add_point_labels(
+            [position],
+            [body.tag],
+            font_size=12,
+            text_color="black",
+            shape_color=body.color,
+            shape_opacity=0.55,
+            show_points=False,
+            always_visible=True,
+            name=f"label:{body.id}",
+            reset_camera=False,
+            render=False,
+        )
+
+    def _build_datum_axis(self, body: Body) -> BodyVisual:
+        line = body.to_polydata()
+        actor = self.plotter.add_mesh(
+            line,
+            color=body.color,
+            line_width=4,
+            render_lines_as_tubes=True,
+            name=f"body:{body.id}",
+            reset_camera=False,
+            render=False,
+        )
+        label = self._label(body, line.points[-1])
+        return BodyVisual(
+            body.id, body.kind, [actor, label], datum=actor, base_color=tuple(body.color)
+        )
+
+    def _build_datum_plane(self, body: Body) -> BodyVisual:
+        plane = body.to_polydata()
+        actor = self.plotter.add_mesh(
+            plane,
+            color=body.color,
+            opacity=0.3,
+            show_edges=True,
+            edge_color=body.color,
+            line_width=2,
+            name=f"body:{body.id}",
+            reset_camera=False,
+            render=False,
+        )
+        label = self._label(body, plane.points[np.argmax(plane.points @ np.ones(3))])
+        return BodyVisual(
+            body.id, body.kind, [actor, label], datum=actor, base_color=tuple(body.color)
+        )
 
     def _build_lines(self, body: Body) -> BodyVisual:
         data = body.to_polydata()

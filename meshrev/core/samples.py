@@ -101,3 +101,57 @@ def make_demo_piston(spec: PistonSpec | None = None, voxel_size: float = 0.5) ->
     mesh.point_data.clear()
     mesh.cell_data.clear()
     return mesh
+
+
+def make_capped_cylinder(
+    radius: float = 10.0,
+    height: float = 20.0,
+    center=(0.0, 0.0, 0.0),
+    direction=(0.0, 0.0, 1.0),
+    n_theta: int = 96,
+    n_z: int = 24,
+    n_rings: int = 8,
+) -> pv.PolyData:
+    """Closed cylinder with well shaped triangles and vertices exactly on the surface
+    (unlike a subdivided ``pv.Cylinder``) - a clean test object for recognition."""
+    theta = np.linspace(0.0, 2 * np.pi, n_theta, endpoint=False)
+    cos, sin = np.cos(theta), np.sin(theta)
+    z_levels = np.linspace(-0.5 * height, 0.5 * height, n_z + 1)
+    points = [np.column_stack([radius * cos, radius * sin, np.full(n_theta, z)]) for z in z_levels]
+    tris: list[np.ndarray] = []
+    i = np.arange(n_theta)
+    j = (i + 1) % n_theta
+    for level in range(n_z):  # side: outward winding
+        a, b = level * n_theta, (level + 1) * n_theta
+        tris.append(np.column_stack([a + i, a + j, b + j]))
+        tris.append(np.column_stack([a + i, b + j, b + i]))
+    offset = (n_z + 1) * n_theta
+    for z, up in ((0.5 * height, True), (-0.5 * height, False)):
+        rings = [radius * k / n_rings for k in range(1, n_rings)]
+        base = offset
+        points.append(np.array([[0.0, 0.0, z]]))
+        for r in rings:
+            points.append(np.column_stack([r * cos, r * sin, np.full(n_theta, z)]))
+        points.append(np.column_stack([radius * cos, radius * sin, np.full(n_theta, z)]))
+        ring = [base + 1 + k * n_theta for k in range(len(rings) + 1)]
+        cap = [np.column_stack([np.full(n_theta, base), ring[0] + i, ring[0] + j])]
+        for inner, outer in zip(ring[:-1], ring[1:], strict=True):
+            cap.append(np.column_stack([inner + i, outer + i, outer + j]))
+            cap.append(np.column_stack([inner + i, outer + j, inner + j]))
+        cap = np.vstack(cap)
+        tris.append(cap if up else cap[:, ::-1])
+        offset += 1 + (len(rings) + 1) * n_theta
+    faces = np.vstack(tris)
+    cells = np.column_stack([np.full(len(faces), 3), faces]).ravel()
+    mesh = clean(pv.PolyData(np.vstack(points), faces=cells))
+    d = np.asarray(direction, dtype=np.float64)
+    d /= np.linalg.norm(d)
+    z_axis = np.array([0.0, 0.0, 1.0])
+    axis = np.cross(z_axis, d)
+    if np.linalg.norm(axis) > 1e-12:
+        angle = np.degrees(np.arccos(np.clip(z_axis @ d, -1.0, 1.0)))
+        mesh = mesh.rotate_vector(axis, angle, inplace=False)
+    elif d[2] < 0:
+        mesh = mesh.rotate_x(180.0, inplace=False)
+    mesh.translate(center, inplace=True)
+    return orient_outward(mesh)

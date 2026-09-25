@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
+import numpy as np
 import pyvista as pv
 
 from meshrev.core.cad.kernel import CadKernel, Shape
 from meshrev.core.mesh.processing import MeshStats, mesh_statistics
+from meshrev.core.mesh.topology import MeshGeometry
+from meshrev.core.primitives import PrimitiveType, SegmentationResult
 from meshrev.core.section.slicer import SectionCurve
-from meshrev.core.types import BBox, Units, new_id
+from meshrev.core.types import Axis, BBox, Plane, Units, new_id
 
 RGB = tuple[float, float, float]
 
@@ -22,6 +27,9 @@ class BodyKind(str, Enum):
     MESH = "mesh"
     CAD = "cad"
     SECTION = "section"
+    REGIONS = "regions"
+    DATUM_AXIS = "datum_axis"
+    DATUM_PLANE = "datum_plane"
 
 
 def _fmt(value: float, digits: int = 4) -> str:
@@ -30,6 +38,14 @@ def _fmt(value: float, digits: int = 4) -> str:
 
 def format_vec(vec, digits: int = 4) -> str:
     return "(" + ", ".join(_fmt(float(x), digits) for x in vec) + ")"
+
+
+def format_plane_equation(a: float, b: float, c: float, d: float, digits: int = 6) -> str:
+    terms = [f"{a:.{digits}f}x"]
+    for value, var in ((b, "y"), (c, "z"), (d, "")):
+        sign = "-" if value < 0 else "+"
+        terms.append(f"{sign} {abs(value):.{digits}f}{var}")
+    return " ".join(terms) + " = 0"
 
 
 class Body(ABC):
@@ -55,6 +71,14 @@ class Body(ABC):
     @abstractmethod
     def to_polydata(self) -> pv.PolyData:
         """Geometry used for display, bounds and mesh export."""
+
+    @property
+    def tag(self) -> str:
+        """Short ASCII label drawn in the 3D view (VTK's default font has no CJK glyphs)."""
+        match = re.search(r"(\d+)\s*$", self.name)
+        return f"{self.tag_prefix}{match.group(1) if match else ''}"
+
+    tag_prefix: ClassVar[str] = "B"
 
     def bounds(self) -> BBox | None:
         data = self.to_polydata()
@@ -168,7 +192,175 @@ class SectionBody(Body):
 
     def info(self) -> dict[str, str]:
         info = super().info()
-        a, b, c, d = self.curve.plane.equation
-        info["截面平面"] = f"{a:.4f}x + {b:.4f}y + {c:.4f}z + {d:.4f} = 0"
+        info["截面平面"] = format_plane_equation(*self.curve.plane.equation, digits=4)
         info["多段线数"] = str(len(self.curve.polylines))
+        return info
+
+
+ColorScheme = Literal["region", "type"]
+
+
+class RegionSetBody(Body):
+    """A mesh partitioned into primitive regions (auto segmentation / RANSAC result).
+
+    ``polydata`` is the triangle mesh the labels refer to (one label per cell).
+    """
+
+    kind = BodyKind.REGIONS
+
+    def __init__(
+        self,
+        polydata: pv.PolyData,
+        segmentation: SegmentationResult,
+        name: str,
+        *,
+        mesh_id: str | None = None,
+        color_scheme: ColorScheme = "region",
+        **kwargs,
+    ) -> None:
+        super().__init__(name, **kwargs)
+        if len(segmentation.labels) != polydata.n_cells:
+            raise ValueError("segmentation labels do not match the mesh cells")
+        self.polydata = polydata
+        self.segmentation = segmentation
+        self.mesh_id = mesh_id
+        self.color_scheme: ColorScheme = color_scheme
+
+    @cached_property
+    def geometry(self) -> MeshGeometry:
+        return MeshGeometry.from_polydata(self.polydata)
+
+    def to_polydata(self) -> pv.PolyData:
+        return self.polydata
+
+    def face_colors(self) -> np.ndarray:
+        return self.segmentation.face_colors(self.color_scheme)
+
+    # -- region queries used by the tree, the property panel and picking --------------
+    def region_of_face(self, face_id: int) -> int:
+        return int(self.segmentation.labels[face_id])
+
+    def faces_of_regions(self, region_ids: Sequence[int]) -> np.ndarray:
+        return self.segmentation.faces_of(list(region_ids))
+
+    def region_ids_of_type(self, type_key: str) -> list[int]:
+        return [r.id for r in self.segmentation.regions_of_type(PrimitiveType(type_key))]
+
+    def region_groups(self) -> list[tuple[str, str, list[tuple[int, str, tuple[int, int, int]]]]]:
+        """``(type key, label, [(region id, text, rgb)])`` for every non-empty type."""
+        colors = self.segmentation.region_colors(self.color_scheme)
+        groups = []
+        for kind in PrimitiveType:
+            rows = []
+            for region in self.segmentation.regions_of_type(kind):
+                text = f"R{region.id}  {kind.label}  ({len(region.face_ids):,} 面)"
+                prim = region.primitive
+                if prim is not None and hasattr(prim, "radius"):
+                    text += f"  r={prim.radius:.3f}"
+                rows.append((region.id, text, tuple(int(c) for c in colors[region.id])))
+            if rows:
+                groups.append((kind.value, kind.label, rows))
+        return groups
+
+    def regions_info(self, region_ids: Sequence[int]) -> dict[str, str]:
+        regions = [self.segmentation.region(i) for i in region_ids]
+        if len(regions) == 1:
+            return regions[0].describe()
+        kinds = sorted({r.type.label for r in regions})
+        return {
+            "选中区域": ", ".join(f"R{r.id}" for r in regions),
+            "区域数": str(len(regions)),
+            "类型": " / ".join(kinds),
+            "面片数": f"{sum(len(r.face_ids) for r in regions):,}",
+            "面积": f"{sum(r.area for r in regions):.3f}",
+        }
+
+    def info(self) -> dict[str, str]:
+        info = super().info()
+        info["源网格"] = self.mesh_id or "-"
+        info.update(self.segmentation.summary())
+        return info
+
+
+class DatumAxisBody(Body):
+    """Reference axis (e.g. the pin bore axis extracted from a fitted cylinder)."""
+
+    kind = BodyKind.DATUM_AXIS
+    default_color = (0.95, 0.45, 0.05)
+    tag_prefix = "A"
+
+    def __init__(
+        self,
+        axis: Axis,
+        length: float,
+        name: str,
+        *,
+        radius: float | None = None,
+        rms: float | None = None,
+        concave: bool | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(name, **kwargs)
+        self.axis = axis
+        self.length = float(length)
+        self.radius = radius
+        self.rms = rms
+        self.concave = concave
+
+    def endpoints(self, margin_ratio: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+        half = 0.5 * self.length * (1.0 + 2.0 * margin_ratio)
+        half = max(half, 1e-3)
+        return self.axis.point_at(-half), self.axis.point_at(half)
+
+    def to_polydata(self) -> pv.PolyData:
+        start, end = self.endpoints()
+        return pv.Line(start, end)
+
+    def info(self) -> dict[str, str]:
+        info = super().info()
+        info["轴线点"] = format_vec(self.axis.origin, 5)
+        info["轴线方向"] = format_vec(self.axis.direction, 6)
+        info["长度"] = f"{self.length:.3f}"
+        if self.radius is not None:
+            info["源圆柱半径"] = f"{self.radius:.5f}"
+            info["源圆柱直径"] = f"{2 * self.radius:.5f}"
+        if self.concave is not None:
+            info["源圆柱类型"] = "孔" if self.concave else "轴"
+        if self.rms is not None:
+            info["拟合 RMS"] = f"{self.rms:.5f}"
+        return info
+
+
+class DatumPlaneBody(Body):
+    """Reference plane (e.g. the cylinder head gasket face)."""
+
+    kind = BodyKind.DATUM_PLANE
+    default_color = (0.30, 0.55, 0.95)
+    tag_prefix = "P"
+
+    def __init__(
+        self, plane: Plane, size: float, name: str, *, rms: float | None = None, **kwargs
+    ) -> None:
+        super().__init__(name, **kwargs)
+        self.plane = plane
+        self.size = float(size)
+        self.rms = rms
+
+    def to_polydata(self) -> pv.PolyData:
+        return pv.Plane(
+            center=self.plane.origin,
+            direction=self.plane.normal,
+            i_size=self.size,
+            j_size=self.size,
+            i_resolution=1,
+            j_resolution=1,
+        )
+
+    def info(self) -> dict[str, str]:
+        info = super().info()
+        info["平面方程"] = format_plane_equation(*self.plane.equation)
+        info["法向"] = format_vec(self.plane.normal, 6)
+        info["中心点"] = format_vec(self.plane.origin, 4)
+        if self.rms is not None:
+            info["拟合 RMS"] = f"{self.rms:.5f}"
         return info

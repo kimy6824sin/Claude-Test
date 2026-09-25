@@ -65,6 +65,7 @@ class FeatureTree(QTreeWidget):
                 if body is None:
                     continue
                 b_item = self._make_item(("body", body.id), body.name)
+                b_item.setToolTip(0, f"{body.name}  [{body.tag}]")
                 b_item.setFlags(b_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 b_item.setCheckState(
                     0, Qt.CheckState.Checked if body.visible else Qt.CheckState.Unchecked
@@ -89,6 +90,7 @@ class FeatureTree(QTreeWidget):
             for region_id, text, color in region_rows:
                 r_item = self._make_item(("region", body.id, region_id), text)
                 r_item.setForeground(0, QBrush(QColor(*color).darker(135)))
+                r_item.setToolTip(0, text)
                 g_item.addChild(r_item)
 
     def _make_item(self, key: tuple, text: str) -> QTreeWidgetItem:
@@ -117,6 +119,9 @@ class FeatureTree(QTreeWidget):
 
     # -- updates ----------------------------------------------------------------------
     def _on_body_changed(self, body_id: str, attribute: str) -> None:
+        if attribute == "color":
+            self.rebuild()
+            return
         item = self._items.get(("body", body_id))
         body = self.controller.document.find(body_id)
         if item is None or body is None:

@@ -17,11 +17,20 @@ from meshrev.core.features.commands import (
     UndoStack,
 )
 from meshrev.core.features.history import FeatureHistory
+from meshrev.core.features.recognition import (
+    AutoSegmentFeature,
+    DatumAxisFeature,
+    DatumPlaneFeature,
+    PrimitiveDetectFeature,
+)
 
 __all__ = [
     "FEATURE_TYPES",
     "AddFeatureCommand",
+    "AutoSegmentFeature",
     "Command",
+    "DatumAxisFeature",
+    "DatumPlaneFeature",
     "EditParamsCommand",
     "Feature",
     "FeatureContext",
@@ -30,6 +39,7 @@ __all__ = [
     "FeatureState",
     "ImportFeature",
     "ParamSpec",
+    "PrimitiveDetectFeature",
     "RemoveFeatureCommand",
     "SectionFeature",
     "SuppressFeatureCommand",

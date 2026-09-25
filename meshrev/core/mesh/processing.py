@@ -16,7 +16,10 @@ def ensure_triangles(mesh: pv.DataSet) -> pv.PolyData:
     """Return a triangle-only surface: extracts the surface, triangulates and drops
     degenerate cells, lines and vertices."""
     if not isinstance(mesh, pv.PolyData):
-        mesh = mesh.extract_surface()
+        try:  # pyvista >= 0.47 warns unless the algorithm is explicit
+            mesh = mesh.extract_surface(algorithm="dataset_surface")
+        except TypeError:
+            mesh = mesh.extract_surface()
     if mesh.n_lines or mesh.n_verts or not mesh.is_all_triangles:
         mesh = mesh.triangulate()
         mesh = pv.PolyData(mesh.points, faces=mesh.faces)  # drop lines/verts

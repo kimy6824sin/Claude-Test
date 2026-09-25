@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self._update_title()
         self._update_undo_actions()
+        self._on_selection_changed(self.controller.selection)
 
     # -- construction -----------------------------------------------------------------
     def _make_dock(self, title: str, widget, area: Qt.DockWidgetArea) -> QDockWidget:
@@ -185,6 +186,39 @@ class MainWindow(QMainWindow):
             )
             self.preset_group.addAction(act)
             self.preset_actions[preset] = act
+        self.act_segment = self._action(
+            "自动分割",
+            lambda: c.auto_segment(),
+            "Ctrl+Shift+A",
+            tip="按法向连续性与曲率变化把网格分割为平面/圆柱/球面/自由曲面区域",
+        )
+        self.act_ransac = self._action(
+            "RANSAC 基元提取",
+            lambda: c.detect_primitives(),
+            "Ctrl+Shift+R",
+            tip="基于法向与 RANSAC 提取平面和圆柱，圆柱轴线生成基准轴",
+        )
+        self.act_datum_axis = self._action(
+            "创建基准轴",
+            lambda: c.create_datum("axis"),
+            "Ctrl+Shift+X",
+            tip="用所选区域（可多选同轴区域，如两侧销孔）拟合圆柱并生成基准轴",
+        )
+        self.act_datum_plane = self._action(
+            "创建基准平面",
+            lambda: c.create_datum("plane"),
+            "Ctrl+Shift+P",
+            tip="用所选区域拟合平面并生成基准平面",
+        )
+        self.scheme_group = QActionGroup(self)
+        self.scheme_actions: dict[str, QAction] = {}
+        for scheme, text in (("region", "按区域着色"), ("type", "按基元类型着色")):
+            act = self._action(
+                text, lambda _=False, sc=scheme: c.set_region_color_scheme(sc), checkable=True
+            )
+            self.scheme_group.addAction(act)
+            self.scheme_actions[scheme] = act
+        self.scheme_actions["region"].setChecked(True)
         self.act_mouse_help = self._action("鼠标操作说明", self._show_mouse_help)
         self.act_about = self._action("关于", self._show_about)
 
@@ -220,16 +254,22 @@ class MainWindow(QMainWindow):
         )
         self.view_menu = view_menu
 
-        self.tools_menu = bar.addMenu("工具(&T)")
-        self.tools_menu.menuAction().setVisible(False)  # filled by recognition tools
+        self.tools_menu = bar.addMenu("识别(&R)")
+        self.tools_menu.addActions([self.act_segment, self.act_ransac])
+        self.tools_menu.addSeparator()
+        self.tools_menu.addActions([self.act_datum_axis, self.act_datum_plane])
+        self.tools_menu.addSeparator()
+        self.tools_menu.addActions(list(self.scheme_actions.values()))
 
         help_menu = bar.addMenu("帮助(&H)")
         help_menu.addActions([self.act_mouse_help, self.act_about])
 
         self.feature_tree.set_context_actions("feature", [self.act_suppress, self.act_delete])
         self.feature_tree.set_context_actions(
-            "body", [self.act_toggle_visible, self.act_export_body]
+            "body",
+            [self.act_toggle_visible, self.act_export_body, self.act_segment, self.act_ransac],
         )
+        self.feature_tree.set_context_actions("region", [self.act_datum_axis, self.act_datum_plane])
 
     def _build_toolbars(self) -> None:
         file_bar = QToolBar("文件", self)
@@ -250,6 +290,15 @@ class MainWindow(QMainWindow):
         self.addToolBar(view_bar)
         self.view_toolbar = view_bar
 
+        tools_bar = QToolBar("识别", self)
+        tools_bar.setObjectName("toolbar_recognition")
+        tools_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        tools_bar.addActions(
+            [self.act_segment, self.act_ransac, self.act_datum_axis, self.act_datum_plane]
+        )
+        self.addToolBar(tools_bar)
+        self.tools_toolbar = tools_bar
+
     def _build_statusbar(self) -> None:
         status = self.statusBar()
         self.progress = QProgressBar()
@@ -267,6 +316,7 @@ class MainWindow(QMainWindow):
         c.bodyChanged.connect(self._on_body_changed)
         c.selectionChanged.connect(self._on_selection_changed)
         c.busyChanged.connect(self._on_busy)
+        c.progressChanged.connect(self._on_progress)
         c.statusMessage.connect(lambda text: self.statusBar().showMessage(text, 8000))
         c.errorOccurred.connect(lambda title, text: QMessageBox.warning(self, title, text))
         c.undoStateChanged.connect(self._update_undo_actions)
@@ -311,6 +361,10 @@ class MainWindow(QMainWindow):
             scene.highlight_cells(body.id, cells)
         else:
             scene.clear_highlight()
+        scene.set_selected_body(selection.body_id)
+        has_regions = bool(selection.region_ids)
+        self.act_datum_axis.setEnabled(has_regions)
+        self.act_datum_plane.setEnabled(has_regions)
 
     def _on_cell_picked(self, body_id: str, cell_id: int, additive: bool) -> None:
         document = self.controller.document
@@ -335,11 +389,12 @@ class MainWindow(QMainWindow):
         faces = sum(
             b.to_polydata().n_cells
             for b in bodies
-            if b.visible and b.kind in (BodyKind.MESH, BodyKind.CAD)
+            if b.visible and b.kind in (BodyKind.MESH, BodyKind.CAD, BodyKind.REGIONS)
         )
         self.stats_label.setText(f"实体 {len(bodies)} · 可见三角面 {faces:,}")
 
     def _on_busy(self, busy: bool, message: str) -> None:
+        self.progress.setRange(0, 0)
         self.progress.setVisible(busy)
         if busy:
             self.statusBar().showMessage(message)
@@ -347,6 +402,14 @@ class MainWindow(QMainWindow):
         else:
             QApplication.restoreOverrideCursor()
             self.statusBar().clearMessage()
+
+    def _on_progress(self, fraction: float, message: str) -> None:
+        if not self.progress.isVisible():
+            return
+        self.progress.setRange(0, 100)
+        self.progress.setValue(int(round(100 * fraction)))
+        if message:
+            self.statusBar().showMessage(message)
 
     def _update_undo_actions(self) -> None:
         stack = self.controller.undo_stack

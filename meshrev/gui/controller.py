@@ -11,7 +11,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QThreadPool, Signal, Slot
 
 from meshrev import io as mio
-from meshrev.core.bodies import Body, MeshBody
+from meshrev.core.bodies import Body, MeshBody, RegionSetBody
 from meshrev.core.document import (
     BODY_ADDED,
     BODY_CHANGED,
@@ -22,11 +22,15 @@ from meshrev.core.document import (
 )
 from meshrev.core.features import (
     AddFeatureCommand,
+    AutoSegmentFeature,
     Command,
+    DatumAxisFeature,
+    DatumPlaneFeature,
     EditParamsCommand,
     Feature,
     FeatureContext,
     ImportFeature,
+    PrimitiveDetectFeature,
     RemoveFeatureCommand,
     SuppressFeatureCommand,
     UndoStack,
@@ -60,6 +64,7 @@ class DocumentController(QObject):
     documentCleared = Signal()
     selectionChanged = Signal(object)  # Selection
     busyChanged = Signal(bool, str)
+    progressChanged = Signal(float, str)  # may be emitted from worker threads (queued)
     statusMessage = Signal(str)
     errorOccurred = Signal(str, str)  # title, message
     undoStateChanged = Signal()
@@ -71,7 +76,7 @@ class DocumentController(QObject):
         self.undo_stack.on_changed.append(self.undoStateChanged.emit)
         self.document.history.context_factory = self.make_context
         events = self.document.events
-        events.subscribe(BODY_ADDED, lambda body_id: self.bodyAdded.emit(body_id))
+        events.subscribe(BODY_ADDED, lambda body_id: self._on_body_added(body_id))
         events.subscribe(BODY_REMOVED, lambda body_id: self._on_body_removed(body_id))
         events.subscribe(
             BODY_CHANGED, lambda body_id, attribute: self.bodyChanged.emit(body_id, attribute)
@@ -82,9 +87,14 @@ class DocumentController(QObject):
         self._pool = QThreadPool.globalInstance()
         self._tasks: dict[int, tuple[FunctionWorker, Callable[[Any], None], str]] = {}
         self._next_task_id = 0
+        self._region_sources: dict[str, str] = {}  # region set id -> source mesh id
+        self.region_color_scheme = "region"
 
     def make_context(self) -> FeatureContext:
-        return FeatureContext(self.document, load_file=mio.load)
+        return FeatureContext(self.document, load_file=mio.load, progress=self._report_progress)
+
+    def _report_progress(self, fraction: float, message: str) -> None:
+        self.progressChanged.emit(float(fraction), message)
 
     # -- state ------------------------------------------------------------------------
     @property
@@ -99,8 +109,27 @@ class DocumentController(QObject):
         self._selection = selection or Selection()
         self.selectionChanged.emit(self._selection)
 
+    def _on_body_added(self, body_id: str) -> None:
+        body = self.document.get(body_id)
+        if isinstance(body, RegionSetBody):
+            body.color_scheme = self.region_color_scheme
+        self.bodyAdded.emit(body_id)
+        # a region set is drawn on top of its mesh: hide the plain mesh meanwhile
+        if isinstance(body, RegionSetBody) and body.mesh_id in self.document:
+            self._region_sources[body_id] = body.mesh_id
+            self.document.set_visible(body.mesh_id, False)
+
     def _on_body_removed(self, body_id: str) -> None:
         self.bodyRemoved.emit(body_id)
+        mesh_id = self._region_sources.pop(body_id, None)
+        if mesh_id is not None and mesh_id in self.document:
+            still_covered = any(
+                source == mesh_id and self.document.get(rid).visible
+                for rid, source in self._region_sources.items()
+                if rid in self.document
+            )
+            if not still_covered:
+                self.document.set_visible(mesh_id, True)
         if self._selection.body_id == body_id:
             self.select(Selection())
 
@@ -235,6 +264,61 @@ class DocumentController(QObject):
 
     def set_body_visible(self, body_id: str, visible: bool) -> None:
         self.document.set_visible(body_id, visible)
+
+    # -- primitive recognition -----------------------------------------------------------
+    def target_mesh_id(self) -> str | None:
+        """Mesh to analyse: the selected mesh (or the source of a selected region set),
+        otherwise the first mesh of the document."""
+        body = self.document.find(self._selection.body_id) if self._selection.body_id else None
+        if isinstance(body, MeshBody):
+            return body.id
+        if isinstance(body, RegionSetBody) and body.mesh_id in self.document:
+            return body.mesh_id
+        meshes = self.document.bodies_of_type(MeshBody)
+        return meshes[0].id if meshes else None
+
+    def auto_segment(self, mesh_id: str | None = None, **params: Any) -> bool:
+        mesh_id = mesh_id or self.target_mesh_id()
+        if mesh_id is None:
+            self.errorOccurred.emit("自动分割", "文档中没有网格")
+            return False
+        self.add_feature(
+            AutoSegmentFeature(inputs=[mesh_id], params=params or None), background=True
+        )
+        return True
+
+    def detect_primitives(self, mesh_id: str | None = None, **params: Any) -> bool:
+        mesh_id = mesh_id or self.target_mesh_id()
+        if mesh_id is None:
+            self.errorOccurred.emit("RANSAC 基元提取", "文档中没有网格")
+            return False
+        self.add_feature(
+            PrimitiveDetectFeature(inputs=[mesh_id], params=params or None), background=True
+        )
+        return True
+
+    def create_datum(self, kind: str) -> bool:
+        """Datum axis (``kind="axis"``) or plane from the selected regions."""
+        selection = self._selection
+        body = self.document.find(selection.body_id) if selection.body_id else None
+        if not isinstance(body, RegionSetBody) or not selection.region_ids:
+            self.errorOccurred.emit("创建基准", "请先在视口或特征树中选择一个或多个区域")
+            return False
+        cls = DatumAxisFeature if kind == "axis" else DatumPlaneFeature
+        count = sum(isinstance(f, cls) for f in self.document.history) + 1
+        feature = cls(
+            inputs=[body.id],
+            params={"region_ids": tuple(selection.region_ids)},
+            name=f"{cls.label} {count}",
+        )
+        self.add_feature(feature)
+        return True
+
+    def set_region_color_scheme(self, scheme: str) -> None:
+        self.region_color_scheme = scheme
+        for body in self.document.bodies_of_type(RegionSetBody):
+            body.color_scheme = scheme
+            self.document.notify_changed(body.id, "color")
 
     def undo(self) -> None:
         self._guarded(self.undo_stack.undo, "撤销失败")
