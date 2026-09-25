@@ -1,0 +1,3 @@
+# Optional OpenCASCADE kernel: STEP import/export and solid modelling
+-r requirements.txt
+cadquery-ocp>=7.7
